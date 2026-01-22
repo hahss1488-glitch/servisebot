@@ -808,3 +808,21 @@ def init_database():
         print("✅ PostgreSQL инициализирован")
     else:
         print("✅ Режим в памяти активирован")
+
+        @staticmethod
+        def get_shift(shift_id):
+            """Получить смену по ID (ВАЖНЫЙ МЕТОД!)"""
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM shifts WHERE id = %s", (shift_id,))
+                    result = cur.fetchone()
+                    # Конвертируем даты
+                    if result:
+                        # Преобразуем даты из строк в объекты datetime
+                        if result.get('start_time') and isinstance(result['start_time'], str):
+                            result['start_time'] = datetime.strptime(result['start_time'], '%Y-%m-%d %H:%M:%S.%f')
+                        if result.get('end_time') and isinstance(result['end_time'], str):
+                            result['end_time'] = datetime.strptime(result['end_time'], '%Y-%m-%d %H:%M:%S.%f')
+                        if result.get('created_at') and isinstance(result['created_at'], str):
+                            result['created_at'] = datetime.strptime(result['created_at'], '%Y-%m-%d %H:%M:%S.%f')
+                    return result
