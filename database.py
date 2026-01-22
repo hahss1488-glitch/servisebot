@@ -1,9 +1,10 @@
 """
 ГИБРИДНАЯ ВЕРСИЯ: PostgreSQL если доступно, иначе память
+С ВСЕМИ НУЖНЫМИ МЕТОДАМИ
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Проверяем, есть ли доступ к PostgreSQL
 USE_POSTGRESQL = False
@@ -224,6 +225,21 @@ if not USE_POSTGRESQL:
             return car_total
         
         @staticmethod
+        def clear_car_services(car_id):
+            """Очистить все услуги машины"""
+            # Удаляем все услуги машины
+            services_to_delete = []
+            for service_id, service in storage['car_services'].items():
+                if service['car_id'] == car_id:
+                    services_to_delete.append(service_id)
+            
+            for service_id in services_to_delete:
+                del storage['car_services'][service_id]
+            
+            storage['cars'][car_id]['total_amount'] = 0
+            return 0
+        
+        @staticmethod
         def get_car_services(car_id):
             return [s for s in storage['car_services'].values() if s['car_id'] == car_id]
         
@@ -266,6 +282,28 @@ if not USE_POSTGRESQL:
             return None
         
         @staticmethod
+        def get_shift(shift_id):
+            """Получить смену по ID (НОВЫЙ МЕТОД)"""
+            return storage['shifts'].get(shift_id)
+        
+        @staticmethod
+        def delete_shift(shift_id):
+            """Удалить смену (НОВЫЙ МЕТОД)"""
+            if shift_id in storage['shifts']:
+                # Удаляем все машины смены
+                cars_to_delete = []
+                for car_id, car in storage['cars'].items():
+                    if car['shift_id'] == shift_id:
+                        cars_to_delete.append(car_id)
+                
+                for car_id in cars_to_delete:
+                    DatabaseManager.delete_car(car_id)
+                
+                del storage['shifts'][shift_id]
+                return True
+            return False
+        
+        @staticmethod
         def end_shift(shift_id, end_time=None):
             if shift_id in storage['shifts']:
                 storage['shifts'][shift_id]['end_time'] = end_time or datetime.now()
@@ -294,20 +332,88 @@ if not USE_POSTGRESQL:
         
         @staticmethod
         def get_user_stats(user_id, days=30):
+            """Статистика пользователя (ОБНОВЛЕННЫЙ МЕТОД)"""
+            cutoff_date = datetime.now() - timedelta(days=days)
+            
             shift_count = 0
             total_earned = 0
+            cars_count = 0
             
             for shift in storage['shifts'].values():
-                if shift['user_id'] == user_id and shift['status'] == 'completed':
+                if (shift['user_id'] == user_id and 
+                    shift['status'] == 'completed' and
+                    shift['created_at'] >= cutoff_date):
+                    
                     shift_count += 1
                     total_earned += shift.get('total_amount', 0)
+                    
+                    # Считаем машины в смене
+                    cars_in_shift = len(DatabaseManager.get_shift_cars(shift['id']))
+                    cars_count += cars_in_shift
             
             avg_per_shift = total_earned / shift_count if shift_count > 0 else 0
             
             return {
                 'shift_count': shift_count,
                 'total_earned': total_earned,
-                'avg_per_shift': avg_per_shift
+                'cars_count': cars_count,
+                'avg_per_shift': int(avg_per_shift)
+            }
+        
+        @staticmethod
+        def get_decade_stats(user_id, decade):
+            """Статистика по декаде (НОВЫЙ МЕТОД)"""
+            today = datetime.now()
+            
+            # Определяем границы декады
+            if decade == 1:
+                start_day, end_day = 1, 10
+            elif decade == 2:
+                start_day, end_day = 11, 20
+            else:
+                start_day = 21
+                # Последний день месяца
+                if today.month in [1, 3, 5, 7, 8, 10, 12]:
+                    end_day = 31
+                elif today.month == 2:
+                    end_day = 29 if (today.year % 4 == 0 and today.year % 100 != 0) or (today.year % 400 == 0) else 28
+                else:
+                    end_day = 30
+            
+            # Создаем даты для фильтрации
+            start_date = today.replace(day=start_day, hour=0, minute=0, second=0, microsecond=0)
+            end_date = today.replace(day=end_day, hour=23, minute=59, second=59, microsecond=999999)
+            
+            shift_count = 0
+            total_earned = 0
+            cars_count = 0
+            
+            for shift in storage['shifts'].values():
+                if (shift['user_id'] == user_id and 
+                    shift['status'] == 'completed' and
+                    start_date <= shift['created_at'] <= end_date):
+                    
+                    shift_count += 1
+                    total_earned += shift.get('total_amount', 0)
+                    
+                    # Считаем машины в смене
+                    cars_in_shift = len(DatabaseManager.get_shift_cars(shift['id']))
+                    cars_count += cars_in_shift
+            
+            # Дни в декаде
+            days_passed = min(today.day - start_day + 1, end_day - start_day + 1)
+            if today.day < start_day:
+                days_passed = 0
+            
+            return {
+                'shift_count': shift_count,
+                'total_earned': total_earned,
+                'cars_count': cars_count,
+                'days_passed': days_passed,
+                'total_days': end_day - start_day + 1,
+                'start_day': start_day,
+                'end_day': end_day,
+                'decade': decade
             }
     
     print("✅ Используется хранение в памяти (бесплатный тариф)")
@@ -460,6 +566,15 @@ else:
                     return cur.fetchone()['total_amount']
         
         @staticmethod
+        def clear_car_services(car_id):
+            """Очистить все услуги машины (НОВЫЙ МЕТОД)"""
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM car_services WHERE car_id = %s", (car_id,))
+                    cur.execute("UPDATE cars SET total_amount = 0 WHERE id = %s", (car_id,))
+                    return 0
+        
+        @staticmethod
         def get_car_services(car_id):
             with get_connection() as conn:
                 with conn.cursor() as cur:
@@ -510,7 +625,34 @@ else:
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM car_services WHERE car_id = %s", (car_id,))
                     cur.execute("DELETE FROM cars WHERE id = %s RETURNING shift_id", (car_id,))
-                    return cur.fetchone()['shift_id']
+                    result = cur.fetchone()
+                    return result['shift_id'] if result else None
+        
+        @staticmethod
+        def get_shift(shift_id):
+            """Получить смену по ID (НОВЫЙ МЕТОД)"""
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM shifts WHERE id = %s", (shift_id,))
+                    return cur.fetchone()
+        
+        @staticmethod
+        def delete_shift(shift_id):
+            """Удалить смену (НОВЫЙ МЕТОД)"""
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Удаляем все услуги машин смены
+                    cur.execute("""
+                        DELETE FROM car_services 
+                        WHERE car_id IN (
+                            SELECT id FROM cars WHERE shift_id = %s
+                        )
+                    """, (shift_id,))
+                    # Удаляем все машины смены
+                    cur.execute("DELETE FROM cars WHERE shift_id = %s", (shift_id,))
+                    # Удаляем смену
+                    cur.execute("DELETE FROM shifts WHERE id = %s", (shift_id,))
+                    return True
         
         @staticmethod
         def end_shift(shift_id, end_time=None):
@@ -556,19 +698,109 @@ else:
         
         @staticmethod
         def get_user_stats(user_id, days=30):
+            """Статистика пользователя (ОБНОВЛЕННЫЙ МЕТОД)"""
             with get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
                         SELECT 
-                            COUNT(*) as shift_count,
-                            COALESCE(SUM(total_amount), 0) as total_earned,
-                            COALESCE(AVG(total_amount), 0) as avg_per_shift
-                        FROM shifts 
-                        WHERE user_id = %s 
-                        AND status = 'completed'
-                        AND created_at >= NOW() - INTERVAL '%s days'
+                            COUNT(s.id) as shift_count,
+                            COALESCE(SUM(s.total_amount), 0) as total_earned,
+                            COALESCE(AVG(s.total_amount), 0) as avg_per_shift
+                        FROM shifts s
+                        WHERE s.user_id = %s 
+                        AND s.status = 'completed'
+                        AND s.created_at >= NOW() - INTERVAL '%s days'
                     """, (user_id, days))
-                    return cur.fetchone()
+                    
+                    stats = cur.fetchone()
+                    
+                    # Считаем машины отдельно
+                    cur.execute("""
+                        SELECT COUNT(c.id) as cars_count
+                        FROM shifts s
+                        JOIN cars c ON s.id = c.shift_id
+                        WHERE s.user_id = %s 
+                        AND s.status = 'completed'
+                        AND s.created_at >= NOW() - INTERVAL '%s days'
+                    """, (user_id, days))
+                    
+                    cars_result = cur.fetchone()
+                    cars_count = cars_result['cars_count'] if cars_result else 0
+                    
+                    return {
+                        'shift_count': stats['shift_count'] if stats else 0,
+                        'total_earned': stats['total_earned'] if stats else 0,
+                        'avg_per_shift': int(stats['avg_per_shift']) if stats and stats['avg_per_shift'] else 0,
+                        'cars_count': cars_count
+                    }
+        
+        @staticmethod
+        def get_decade_stats(user_id, decade):
+            """Статистика по декаде (НОВЫЙ МЕТОД)"""
+            today = datetime.now()
+            
+            # Определяем границы декады
+            if decade == 1:
+                start_day, end_day = 1, 10
+            elif decade == 2:
+                start_day, end_day = 11, 20
+            else:
+                start_day = 21
+                # Последний день месяца
+                if today.month in [1, 3, 5, 7, 8, 10, 12]:
+                    end_day = 31
+                elif today.month == 2:
+                    end_day = 29 if (today.year % 4 == 0 and today.year % 100 != 0) or (today.year % 400 == 0) else 28
+                else:
+                    end_day = 30
+            
+            # Создаем даты для фильтрации
+            start_date = today.replace(day=start_day, hour=0, minute=0, second=0, microsecond=0)
+            end_date = today.replace(day=end_day, hour=23, minute=59, second=59, microsecond=999999)
+            
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Считаем смены и выручку
+                    cur.execute("""
+                        SELECT 
+                            COUNT(s.id) as shift_count,
+                            COALESCE(SUM(s.total_amount), 0) as total_earned
+                        FROM shifts s
+                        WHERE s.user_id = %s 
+                        AND s.status = 'completed'
+                        AND s.created_at BETWEEN %s AND %s
+                    """, (user_id, start_date, end_date))
+                    
+                    stats = cur.fetchone()
+                    
+                    # Считаем машины
+                    cur.execute("""
+                        SELECT COUNT(c.id) as cars_count
+                        FROM shifts s
+                        JOIN cars c ON s.id = c.shift_id
+                        WHERE s.user_id = %s 
+                        AND s.status = 'completed'
+                        AND s.created_at BETWEEN %s AND %s
+                    """, (user_id, start_date, end_date))
+                    
+                    cars_result = cur.fetchone()
+                    cars_count = cars_result['cars_count'] if cars_result else 0
+                    
+                    # Дни в декаде
+                    days_passed = min(today.day - start_day + 1, end_day - start_day + 1)
+                    if today.day < start_day:
+                        days_passed = 0
+                    
+                    return {
+                        'shift_count': stats['shift_count'] if stats else 0,
+                        'total_earned': stats['total_earned'] if stats else 0,
+                        'cars_count': cars_count,
+                        'days_passed': days_passed,
+                        'total_days': end_day - start_day + 1,
+                        'start_day': start_day,
+                        'end_day': end_day,
+                        'decade': decade
+                    }
 
 def init_database():
     """Инициализация базы данных"""
