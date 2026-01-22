@@ -197,16 +197,31 @@ def get_decade_stats(user_id: int, decade: int) -> Dict[str, Any]:
 
 # ========== КЛАВИАТУРЫ ==========
 
-def create_main_keyboard() -> InlineKeyboardMarkup:
-    """Главное меню"""
-    keyboard = [
-        [InlineKeyboardButton("🚗 Добавить машину", callback_data="main_add_car")],
-        [InlineKeyboardButton("📊 Текущая смена", callback_data="main_current")],
-        [InlineKeyboardButton("📜 История смен", callback_data="main_history_0")],
-        [InlineKeyboardButton("📈 Статистика", callback_data="main_stats")],
-        [InlineKeyboardButton("⚙️ Настройки", callback_data="main_settings")],
-        [InlineKeyboardButton("❓ Помощь", callback_data="main_help")],
-    ]
+def create_main_keyboard(user=None) -> InlineKeyboardMarkup:
+    """Главное меню с учетом статуса смены"""
+    if user:
+        active_shift = DatabaseManager.get_active_shift(user['id'])
+        has_active_shift = active_shift is not None
+    else:
+        has_active_shift = False
+    
+    keyboard = []
+    
+    if not has_active_shift:
+        # Если смены нет - предлагаем открыть
+        keyboard.append([InlineKeyboardButton("📅 Открыть смену", callback_data="main_open_shift")])
+        keyboard.append([InlineKeyboardButton("🚗 Добавить машину", callback_data="main_add_car_disabled")])
+    else:
+        # Если смена есть - показываем текущую и кнопку добавления
+        keyboard.append([InlineKeyboardButton("📊 Текущая смена", callback_data="main_current")])
+        keyboard.append([InlineKeyboardButton("🚗 Добавить машину", callback_data="main_add_car")])
+    
+    # Остальные кнопки всегда доступны
+    keyboard.append([InlineKeyboardButton("📜 История смен", callback_data="main_history_0")])
+    keyboard.append([InlineKeyboardButton("📈 Статистика", callback_data="main_stats")])
+    keyboard.append([InlineKeyboardButton("⚙️ Настройки", callback_data="main_settings")])
+    keyboard.append([InlineKeyboardButton("❓ Помощь", callback_data="main_help")])
+    
     return InlineKeyboardMarkup(keyboard)
 
 def create_services_keyboard(car_id: int, page: int = 0) -> InlineKeyboardMarkup:
@@ -435,10 +450,17 @@ async def start(update: Update, context: CallbackContext):
     db_user = DatabaseManager.get_user(user.id)
     if not db_user:
         await update.message.reply_text(
-            f"👋 Привет! Я бот для учёта услуг на работе.\n\n"
-            f"Для начала работы введите ваше имя:"
+            f"👋 Привет, {user.first_name}!\n\n"
+            f"Я бот для учёта услуг на СТО/автосервисе.\n\n"
+            f"📊 <b>Что я умею:</b>\n"
+            f"• Учёт машин и услуг\n"
+            f"• Автоматический расчёт сумм\n"
+            f"• Статистика по сменам\n"
+            f"• Отчёты и аналитика\n\n"
+            f"Для начала работы зарегистрируйтесь:",
+            parse_mode='HTML',
+            reply_markup=create_start_keyboard()
         )
-        context.user_data['awaiting_name'] = True
         return
     
     await show_main_menu(update, context, user.id)
@@ -450,6 +472,39 @@ async def show_main_menu(update: Update, context: CallbackContext, user_id: int)
         return
     
     message = f"👤 <b>{user['name']}</b>\n"
+    
+    # Информация об активной смене
+    active_shift = DatabaseManager.get_active_shift(user['id'])
+    if active_shift:
+        total = active_shift.get('total_amount', 0)
+        target = user.get('daily_target', 5000)
+        
+        message += f"\n📅 <b>Активная смена</b> (с {active_shift['start_time'].strftime('%H:%M')})\n"
+        message += f"💰 Заработано: <b>{format_money(total)}</b>\n"
+        message += f"🚗 Машин: <b>{len(DatabaseManager.get_shift_cars(active_shift['id']))}</b>\n"
+        
+        if user.get('progress_bar_enabled', True):
+            message += f"🎯 Цель: {format_money(target)}\n"
+            message += f"📊 {format_progress_bar(total, target)}\n"
+        
+        message += "\nВыберите действие:"
+    else:
+        message += "\n📅 <b>Нет активной смены</b>\n"
+        message += "Начните работу, открыв смену\n"
+        message += "\nВыберите действие:"
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            message, 
+            parse_mode='HTML',
+            reply_markup=create_main_keyboard(user)
+        )
+    else:
+        await update.message.reply_text(
+            message,
+            parse_mode='HTML',
+            reply_markup=create_main_keyboard(user)
+        )
     
     # Информация об активной смене
     active_shift = DatabaseManager.get_active_shift(user['id'])
@@ -644,7 +699,44 @@ async def handle_main_callback(query, context, data):
         await query.edit_message_text("❌ Пользователь не найден")
         return
     
-    if action == "add_car":
+      if action == "open_shift":
+        # Проверяем, есть ли уже активная смена
+        active_shift = DatabaseManager.get_active_shift(db_user['id'])
+        if active_shift:
+            await query.edit_message_text(
+                f"❌ У вас уже есть активная смена!\n\n"
+                f"Начата: {active_shift['start_time'].strftime('%H:%M (%d.%m.%Y)')}\n"
+                f"💰 Заработано: {format_money(active_shift.get('total_amount', 0))}\n"
+                f"🚗 Машин: {len(DatabaseManager.get_shift_cars(active_shift['id']))}",
+                parse_mode='HTML',
+                reply_markup=create_main_keyboard(db_user)
+            )
+        else:
+            # Создаем новую смену
+            shift_id = DatabaseManager.start_shift(db_user['id'])
+            shift = DatabaseManager.get_shift(shift_id)
+            await query.edit_message_text(
+                f"✅ Смена открыта!\n\n"
+                f"📅 Начало: {shift['start_time'].strftime('%H:%M (%d.%m.%Y)')}\n"
+                f"💼 Статус: <b>Активна</b>\n\n"
+                f"Теперь вы можете добавлять машины 🚗",
+                parse_mode='HTML',
+                reply_markup=create_main_keyboard(db_user)
+            )
+    
+    elif action == "add_car":
+        # Проверяем, есть ли активная смена
+        active_shift = DatabaseManager.get_active_shift(db_user['id'])
+        if not active_shift:
+            await query.edit_message_text(
+                "❌ Сначала откройте смену!\n\n"
+                "Нажмите кнопку <b>📅 Открыть смену</b>, "
+                "чтобы начать работу.",
+                parse_mode='HTML',
+                reply_markup=create_main_keyboard(db_user)
+            )
+            return
+        
         context.user_data['awaiting_car_number'] = True
         await query.edit_message_text(
             "🚗 <b>Добавление машины</b>\n\n"
@@ -655,6 +747,15 @@ async def handle_main_callback(query, context, data):
             "• Х340РУ\n\n"
             "Номер можно вводить русскими или английскими буквами.",
             parse_mode='HTML'
+        )
+    
+    elif action == "add_car_disabled":
+        await query.edit_message_text(
+            "❌ Сначала откройте смену!\n\n"
+            "Нажмите кнопку <b>📅 Открыть смену</b>, "
+            "чтобы начать работу и добавлять машины.",
+            parse_mode='HTML',
+            reply_markup=create_main_keyboard(db_user)
         )
     
     elif action == "current":
@@ -1458,8 +1559,9 @@ async def help_command(update: Update, context: CallbackContext):
     await show_help(update.callback_query if update.callback_query else None)
 
 async def error_handler(update: Update, context: CallbackContext):
-    """Обработчик ошибок"""
-    logger.error(f"Ошибка: {context.error}", exc_info=context.error)
+    """Обработчик ошибок с детальной информацией"""
+    # Используем новый детальный обработчик
+    await detailed_error_handler(update, context)
     
     if update and update.effective_message:
         await update.effective_message.reply_text(
@@ -1482,6 +1584,14 @@ def main():
     
     # Обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    def create_start_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для начала работы"""
+    keyboard = [
+        [InlineKeyboardButton("📝 Зарегистрироваться", callback_data="start_register")],
+        [InlineKeyboardButton("❓ Помощь", callback_data="main_help")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
     
     # Обработчик ошибок
     application.add_error_handler(error_handler)
