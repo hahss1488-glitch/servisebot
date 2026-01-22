@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # ========== НАСТРОЙКИ ==========
 # ЗАМЕНИТЕ ЭТОТ ТОКЕН НА СВОЙ!
-BOT_TOKEN = "ВАШ_НОВЫЙ_ТОКЕН_ЗДЕСЬ"
+BOT_TOKEN = "8353243831:AAG_F9d203LLJsRn2VCn2Iocw99jZc0JHTY"
 
 # Настройка логирования
 logging.basicConfig(
