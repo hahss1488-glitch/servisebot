@@ -51,6 +51,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Детальный обработчик ошибок
+import traceback
+
+async def detailed_error_handler(update: Update, context: CallbackContext):
+    """Детальный обработчик ошибок для отладки"""
+    try:
+        # Логируем ошибку
+        logger.error(f"❌ ОШИБКА: {context.error}")
+        logger.error(f"📱 Update: {update}")
+        logger.error(f"💾 User Data: {context.user_data}")
+        
+        # Получаем стек вызовов
+        tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+        tb_string = ''.join(tb_list)
+        logger.error(f"📝 Трассировка:\n{tb_string}")
+        
+        # Показываем пользователю понятное сообщение
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ Произошла ошибка.\n"
+                "Попробуйте ещё раз или перезапустите бота командой /start\n\n"
+                "<i>Администратор уже уведомлён об ошибке</i>",
+                parse_mode='HTML'
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка в обработчике ошибок: {e}")
+
 # Инициализация базы данных
 init_database()
 
