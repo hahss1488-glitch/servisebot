@@ -28,6 +28,9 @@ RUS_TO_ENG = {rus: eng for eng, rus in ENG_TO_RUS.items()}
 # Регион по умолчанию (можно изменить)
 DEFAULT_REGION = "797"
 
+# Разрешенные буквы для использования в номерах
+ALLOWED_LETTERS = RUS_LETTERS  # Просто ссылаемся на RUS_LETTERS
+
 # ========== ПРАЙС-ЛИСТ ==========
 
 SERVICES = {
