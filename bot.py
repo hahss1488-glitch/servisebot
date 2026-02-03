@@ -657,25 +657,6 @@ async def handle_message(update: Update, context: CallbackContext):
             context.user_data.pop('awaiting_car_number', None)
             return
         
-        # Очищаем контекст
-        context.user_data.pop('awaiting_car_number', None)
-        context.user_data.pop('car_for_shift', None)
-        
-        # Сохраняем car_id для показа услуг
-        context.user_data['current_car'] = car_id
-        
-        # Показываем выбор услуг
-        time_type = get_current_time_type()
-        
-        await update.message.reply_text(
-            f"🚗 **Машина добавлена:** `{normalized_number}`\n"
-            f"⏰ {time_type}\n"
-            f"💰 Итог: **0₽**\n\n"
-            f"Выберите услуги:",
-            parse_mode='Markdown',
-            reply_markup=create_services_keyboard(car_id)
-        )
-        return
     
     # Ожидание цели
     elif context.user_data.get('awaiting_target'):
@@ -814,27 +795,6 @@ async def handle_add_car(query, context):
     if not db_user:
         return
     
-    # Проверяем активную смену
-    active_shift = DatabaseManager.get_active_shift(db_user['id'])
-    if not active_shift:
-        await query.edit_message_text(
-            "❌ **Нет активной смены!**\n\n"
-            "Сначала откройте смену через главное меню.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    context.user_data['awaiting_car_number'] = True
-    
-    await query.edit_message_text(
-        f"🚗 **ДОБАВЛЕНИЕ МАШИНЫ**\n\n"
-        f"{get_correct_examples()}\n"
-        f"{get_allowed_letters_explained()}\n"
-        f"{get_wrong_examples()}\n\n"
-        f"**Введите номер машины:**\n"
-        f"_Можно вводить русскими или английскими буквами_",
-        parse_mode='Markdown'
-    )
     
     # Проверяем активную смену
     active_shift = DatabaseManager.get_active_shift(db_user['id'])
