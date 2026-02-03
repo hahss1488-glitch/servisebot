@@ -2,6 +2,11 @@
 🤖 БОТ ДЛЯ УЧЁТА УСЛУГ - ПОЛНАЯ ВЕРСИЯ
 С закреплёнными сообщениями, прогресс-баром и уведомлениями
 """
+from config import (
+    BOT_TOKEN, SERVICES, ALLOWED_LETTERS,
+    normalize_car_number, validate_car_number,
+    get_correct_examples, get_wrong_examples, get_allowed_letters_explained
+)
 
 import logging
 import re
