@@ -4,7 +4,6 @@
 """
 
 import logging
-import re
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
@@ -24,14 +23,13 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, SERVICES, ALLOWED_LETTERS
-from database import DatabaseManager, init_database
-
+# Импорт всех функций из config.py
 from config import (
     BOT_TOKEN, SERVICES, ALLOWED_LETTERS,
     normalize_car_number, validate_car_number,
     get_correct_examples, get_wrong_examples, get_allowed_letters_explained
 )
+from database import DatabaseManager, init_database
 
 # Настройка логирования
 logging.basicConfig(
@@ -42,8 +40,6 @@ logger = logging.getLogger(__name__)
 
 # Инициализация базы данных
 init_database()
-
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
@@ -431,7 +427,7 @@ async def help_command(update: Update, context: CallbackContext):
 📌 **Основные функции:**
 • `📅 Открыть смену` - начать новую рабочую смену
 • `🚗 Добавить машину` - добавить автомобиль для обслуживания
-• `📊 Текущая смена` - управление активной сменой
+• `📊 Текущая смена` - управление активной смены
 • `📜 История смен` - просмотр завершённых смен
 • `📈 Статистика` - аналитика вашей работы
 
@@ -611,7 +607,7 @@ async def handle_message(update: Update, context: CallbackContext):
         await show_main_menu(update, context, user.id)
         return
     
-       # Ожидание номера машины
+    # Ожидание номера машины
     elif context.user_data.get('awaiting_car_number'):
         db_user = DatabaseManager.get_user(user.id)
         
@@ -619,8 +615,8 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text("❌ Ошибка: пользователь не найден")
             return
         
-        # ПРОВЕРЯЕМ ВАЛИДНОСТЬ НОМЕРА (НОВАЯ ЛОГИКА)
-    is_valid, normalized_number, error_msg = validate_car_number(text)
+        # ПРОВЕРЯЕМ ВАЛИДНОСТЬ НОМЕРА
+        is_valid, normalized_number, error_msg = validate_car_number(text)
         
         if not is_valid:
             await update.message.reply_text(
@@ -632,8 +628,6 @@ async def handle_message(update: Update, context: CallbackContext):
             return
         
         # Номер валиден, используем normalized_number
-        normalized_number = normalized_number  # Уже нормализован в функции валидации
-        
         # Получаем shift_id из контекста
         shift_id = context.user_data.get('car_for_shift')
         if not shift_id:
@@ -657,6 +651,25 @@ async def handle_message(update: Update, context: CallbackContext):
             context.user_data.pop('awaiting_car_number', None)
             return
         
+        # Очищаем контекст
+        context.user_data.pop('awaiting_car_number', None)
+        context.user_data.pop('car_for_shift', None)
+        
+        # Сохраняем car_id для показа услуг
+        context.user_data['current_car'] = car_id
+        
+        # Показываем выбор услуг
+        time_type = get_current_time_type()
+        
+        await update.message.reply_text(
+            f"🚗 **Машина добавлена:** `{normalized_number}`\n"
+            f"⏰ {time_type}\n"
+            f"💰 Итог: **0₽**\n\n"
+            f"Выберите услуги:",
+            parse_mode='Markdown',
+            reply_markup=create_services_keyboard(car_id)
+        )
+        return
     
     # Ожидание цели
     elif context.user_data.get('awaiting_target'):
@@ -795,7 +808,6 @@ async def handle_add_car(query, context):
     if not db_user:
         return
     
-    
     # Проверяем активную смену
     active_shift = DatabaseManager.get_active_shift(db_user['id'])
     if not active_shift:
@@ -810,17 +822,10 @@ async def handle_add_car(query, context):
     
     await query.edit_message_text(
         f"🚗 **ДОБАВЛЕНИЕ МАШИНЫ**\n\n"
-        f"✅ **ПРАВИЛЬНЫЕ ПРИМЕРЫ:**\n"
-        f"• А123ВС777\n"
-        f"• Х340КХ797\n"
-        f"• В567ТХ799\n\n"
-        f"✅ **РАЗРЕШЁННЫЕ БУКВЫ:**\n"
-        f"{' '.join(ALLOWED_LETTERS)}\n\n"
-        f"❌ **НЕПРАВИЛЬНО:**\n"
-        f"• А123БВ777 (буква Б не разрешена)\n"
-        f"• ABC123 (английские буквы)\n"
-        f"• 123456 (только цифры)\n\n"
-        f"**Введите номер машины:**",
+        f"{get_correct_examples()}\n"
+        f"{get_allowed_letters_explained()}\n\n"
+        f"**Введите номер машины:**\n"
+        f"_Можно вводить русскими или английскими буквами_",
         parse_mode='Markdown'
     )
 
@@ -1484,9 +1489,6 @@ async def handle_decade_stats(query, context):
     
     decade, (start_day, end_day) = get_current_decade()
     
-    # Временная заглушка для статистики
-    # В реальном приложении здесь должен быть вызов DatabaseManager.get_decade_stats()
-    
     message = (
         f"📈 **СТАТИСТИКА ЗА ДЕКАДУ**\n\n"
         f"📅 Декада {decade} ({start_day}-{end_day})\n"
@@ -1533,15 +1535,8 @@ async def handle_create_backup(query, context):
     """Создание backup"""
     user = query.from_user
     
-    # В режиме памяти можно сохранить backup
     try:
-        # Это работает только в режиме памяти
-        # В PostgreSQL backup делается через pg_dump
         await query.answer("✅ Backup создан (только для режима памяти)", show_alert=True)
-        
-        # В реальном приложении здесь должна быть логика создания backup
-        # DatabaseManager.save_backup() если в режиме памяти
-        
     except Exception as e:
         await query.answer(f"❌ Ошибка создания backup: {e}", show_alert=True)
 
@@ -1705,7 +1700,6 @@ async def handle_view_car(query, context, data):
 
 async def handle_cars_page(query, context, data):
     """Пагинация машин"""
-    # Временная заглушка
     await query.answer("Пагинация машин в разработке", show_alert=True)
 
 # ========== ОБРАБОТЧИК ОШИБОК ==========
