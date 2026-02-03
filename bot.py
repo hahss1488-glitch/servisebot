@@ -409,14 +409,32 @@ async def start_command(update: Update, context: CallbackContext):
         db_user = DatabaseManager.get_user(user.id)
         
         if not db_user:
+            # Автоматическая регистрация с именем из Telegram
+            # Используем first_name, если есть, иначе username, иначе "Пользователь"
+            name = user.first_name
+            if not name or name.strip() == "":
+                name = user.username or "Пользователь"
+            
+            # Регистрируем пользователя
+            DatabaseManager.register_user(user.id, name)
+            db_user = DatabaseManager.get_user(user.id)
+            
+            if not db_user:
+                logger.error(f"Не удалось зарегистрировать пользователя {user.id}")
+                await update.message.reply_text(
+                    "❌ Произошла ошибка при регистрации. Попробуйте ещё раз."
+                )
+                return
+            
             await update.message.reply_text(
-                f"👋 Привет, {user.first_name}!\n\n"
-                f"Я бот для учёта услуг на СТО/автосервисе.\n"
-                f"Для начала работы введите ваше имя:"
+                f"👋 Привет, **{name}**!\n\n"
+                f"✅ Вы успешно зарегистрированы!\n"
+                f"Я бот для учёта услуг на СТО/автосервисе.\n\n"
+                f"Теперь вы можете начать работу.",
+                parse_mode='Markdown'
             )
-            context.user_data['awaiting_name'] = True
-            return
         
+        # Показываем главное меню
         await show_main_menu(update, context, user.id)
 
 async def help_command(update: Update, context: CallbackContext):
@@ -589,32 +607,25 @@ async def handle_message(update: Update, context: CallbackContext):
     user = update.effective_user
     text = update.message.text.strip()
     
-    # Ожидание имени при регистрации
-    if context.user_data.get('awaiting_name'):
-        if len(text) < 2:
-            await update.message.reply_text("❌ Имя слишком короткое. Введите ещё раз:")
-            return
+    # Проверяем, зарегистрирован ли пользователь
+    db_user = DatabaseManager.get_user(user.id)
+    if not db_user:
+        # Если пользователь не зарегистрирован, регистрируем его
+        name = user.first_name
+        if not name or name.strip() == "":
+            name = user.username or "Пользователь"
         
-        DatabaseManager.register_user(user.id, text)
-        context.user_data.pop('awaiting_name', None)
-        
-        await update.message.reply_text(
-            f"✅ Отлично, **{text}**! Вы зарегистрированы.\n\n"
-            f"Теперь вы можете начать работу.",
-            parse_mode='Markdown'
-        )
-        
-        await show_main_menu(update, context, user.id)
-        return
-    
-    # Ожидание номера машины
-    elif context.user_data.get('awaiting_car_number'):
+        DatabaseManager.register_user(user.id, name)
         db_user = DatabaseManager.get_user(user.id)
         
         if not db_user:
-            await update.message.reply_text("❌ Ошибка: пользователь не найден")
+            await update.message.reply_text(
+                "❌ Произошла ошибка при регистрации. Попробуйте команду /start"
+            )
             return
-        
+    
+    # Ожидание номера машины
+    if context.user_data.get('awaiting_car_number'):
         # ПРОВЕРЯЕМ ВАЛИДНОСТЬ НОМЕРА
         is_valid, normalized_number, error_msg = validate_car_number(text)
         
@@ -688,11 +699,9 @@ async def handle_message(update: Update, context: CallbackContext):
             )
             
             # Обновляем закреплённое сообщение
-            db_user = DatabaseManager.get_user(user.id)
-            if db_user:
-                active_shift = DatabaseManager.get_active_shift(db_user['id'])
-                if active_shift:
-                    await create_or_update_pinned_message(context, db_user['id'], user.id)
+            active_shift = DatabaseManager.get_active_shift(db_user['id'])
+            if active_shift:
+                await create_or_update_pinned_message(context, db_user['id'], user.id)
             
             await show_main_menu(update, context, user.id)
             
@@ -719,23 +728,26 @@ async def handle_callback(update: Update, context: CallbackContext):
     logger.info(f"Callback: {data} from {user.id}")
     
     # Проверяем регистрацию
-    if data not in ["noop", "start_register"]:
+    if data != "noop":  # noop не требует регистрации
         db_user = DatabaseManager.get_user(user.id)
         if not db_user:
-            await query.edit_message_text(
-                "❌ Сначала зарегистрируйтесь!\n\n"
-                "Напишите /start для начала работы."
-            )
-            return
+            # Автоматически регистрируем пользователя
+            name = user.first_name
+            if not name or name.strip() == "":
+                name = user.username or "Пользователь"
+            
+            DatabaseManager.register_user(user.id, name)
+            db_user = DatabaseManager.get_user(user.id)
+            
+            if not db_user:
+                await query.edit_message_text(
+                    "❌ Ошибка регистрации.\n\n"
+                    "Попробуйте команду /start"
+                )
+                return
     
     # Обработка noop (пустая кнопка)
     if data == "noop":
-        return
-    
-    # Регистрация через кнопку
-    if data == "start_register":
-        await query.edit_message_text("Введите ваше имя:")
-        context.user_data['awaiting_name'] = True
         return
     
     # Маршрутизация по префиксам
@@ -867,46 +879,58 @@ async def handle_open_shift(query, context):
 
 async def show_main_menu(update: Update, context: CallbackContext, user_id: int):
     """Показать главное меню"""
-    user = DatabaseManager.get_user(user_id)
-    if not user:
-        return
-    
-    message = f"👤 **{user['name']}**\n\n"
-    
-    # Информация об активной смене
-    active_shift = DatabaseManager.get_active_shift(user['id'])
-    if active_shift:
-        total = DatabaseManager.get_shift_total(active_shift['id'])
-        target = user.get('daily_target', 5000)
+    try:
+        user = DatabaseManager.get_user(user_id)
+        if not user:
+            logger.error(f"Пользователь {user_id} не найден")
+            if update.message:
+                await update.message.reply_text(
+                    "❌ Ошибка: пользователь не найден. Попробуйте: /start"
+                )
+            return
         
-        message += f"📅 **Активная смена** (с {active_shift['start_time'].strftime('%H:%M')})\n"
-        message += f"🚗 Машин: **{len(DatabaseManager.get_shift_cars(active_shift['id']))}**\n"
-        message += f"💰 Заработано: **{format_money(total)}**\n"
+        message = f"👤 **{user['name']}**\n\n"
         
-        if user.get('progress_bar_enabled', True):
-            message += f"🎯 Цель: {format_money(target)}\n"
-            message += f"`{format_progress_bar(total, target)}`\n"
+        # Информация об активной смене
+        active_shift = DatabaseManager.get_active_shift(user['id'])
+        if active_shift:
+            total = DatabaseManager.get_shift_total(active_shift['id'])
+            target = user.get('daily_target', 5000)
+            
+            message += f"📅 **Активная смена** (с {active_shift['start_time'].strftime('%H:%M')})\n"
+            message += f"🚗 Машин: **{len(DatabaseManager.get_shift_cars(active_shift['id']))}**\n"
+            message += f"💰 Заработано: **{format_money(total)}**\n"
+            
+            if user.get('progress_bar_enabled', True):
+                message += f"🎯 Цель: {format_money(target)}\n"
+                message += f"`{format_progress_bar(total, target)}`\n"
+            
+            message += "\nВыберите действие:"
+            has_active_shift = True
+        else:
+            message += "📅 **Нет активной смены**\n"
+            message += "Начните работу, открыв смену\n"
+            message += "\nВыберите действие:"
+            has_active_shift = False
         
-        message += "\nВыберите действие:"
-        has_active_shift = True
-    else:
-        message += "📅 **Нет активной смены**\n"
-        message += "Начните работу, открыв смену\n"
-        message += "\nВыберите действие:"
-        has_active_shift = False
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            message, 
-            parse_mode='Markdown',
-            reply_markup=create_main_keyboard(user, has_active_shift)
-        )
-    else:
-        await update.message.reply_text(
-            message,
-            parse_mode='Markdown',
-            reply_markup=create_main_keyboard(user, has_active_shift)
-        )
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                message, 
+                parse_mode='Markdown',
+                reply_markup=create_main_keyboard(user, has_active_shift)
+            )
+        else:
+            await update.message.reply_text(
+                message,
+                parse_mode='Markdown',
+                reply_markup=create_main_keyboard(user, has_active_shift)
+            )
+    except Exception as e:
+        logger.error(f"Ошибка в show_main_menu: {e}", exc_info=True)
+        if update.message:
+            await update.message.reply_text(
+                "❌ Ошибка загрузки меню. Попробуйте: /start"
+            )
 
 # ========== ОБРАБОТЧИКИ УСЛУГ ==========
 
