@@ -620,7 +620,7 @@ async def handle_message(update: Update, context: CallbackContext):
             return
         
         # ПРОВЕРЯЕМ ВАЛИДНОСТЬ НОМЕРА (НОВАЯ ЛОГИКА)
-        is_valid, normalized_number, error_msg = validate_car_number_custom(text)
+    is_valid, normalized_number, error_msg = validate_car_number(text)
         
         if not is_valid:
             await update.message.reply_text(
