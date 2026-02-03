@@ -14,7 +14,6 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     Message,
-    CallbackQuery  # ВОТ ЭТОГО НЕ ХВАТАЛО
 )
 from telegram.ext import (
     Application,
