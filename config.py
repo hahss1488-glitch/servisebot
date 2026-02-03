@@ -1,4 +1,4 @@
-BOT_TOKEN = "8502739606:AAFHYK8BDky1-Uvp1wFVq8VpJ8-acJ7mH2Q"
+BOT_TOKEN = "8510242071:AAG1XKkvTCLhgJ-D2UircT0BPNDPK0mIwA0"
 
 # ========== НАСТРОЙКИ НОМЕРОВ ==========
 
