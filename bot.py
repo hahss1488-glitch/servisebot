@@ -9,7 +9,7 @@ import csv
 import os
 import shutil
 import calendar
-from typing import List, Optional
+from typing import List
 
 from telegram import (
     Update,
@@ -87,31 +87,16 @@ def create_main_reply_keyboard(has_active_shift: bool = False) -> ReplyKeyboardM
     )
 
 def get_service_order() -> List[int]:
-    services = []
-    for service_id, service in SERVICES.items():
-        if service.get("hidden"):
-            continue
-        services.append((service.get("priority", 99), service.get("order", 99), service_id))
-    services.sort()
-    return [service_id for _, _, service_id in services]
+    frequent = [service_id for service_id, service in SERVICES.items() if service.get("frequent")]
+    other = [service_id for service_id, service in SERVICES.items() if not service.get("frequent")]
+    return frequent + other
 
 def chunk_buttons(buttons: List[InlineKeyboardButton], columns: int) -> List[List[InlineKeyboardButton]]:
     return [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
 
-def create_services_keyboard(
-    car_id: int,
-    page: int = 0,
-    is_edit_mode: bool = False,
-    price_mode: str = "day",
-    group_id: Optional[int] = None
-) -> InlineKeyboardMarkup:
+def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = False) -> InlineKeyboardMarkup:
     """Клавиатура выбора услуг (с колонками и перелистыванием)"""
-    if group_id:
-        group = SERVICES.get(group_id, {})
-        service_ids = group.get("children", [])
-    else:
-        service_ids = get_service_order()
-
+    service_ids = get_service_order()
     per_page = 6
     max_page = max((len(service_ids) - 1) // per_page, 0)
     page = max(0, min(page, max_page))
@@ -123,15 +108,7 @@ def create_services_keyboard(
     buttons = []
     for service_id in page_ids:
         service = SERVICES[service_id]
-        if service.get("kind") == "group":
-            text = f"▶️ {service['name']}"
-            buttons.append(InlineKeyboardButton(text, callback_data=f"open_group_{service_id}_{car_id}_{page}"))
-            continue
-        if service.get("kind") == "distance":
-            text = f"{service['name']} (по км)"
-            buttons.append(InlineKeyboardButton(text, callback_data=f"distance_{service_id}_{car_id}_{page}"))
-            continue
-        price = get_current_price(service_id, price_mode)
+        price = get_current_price(service_id)
         text = f"{service['name']} ({price}₽)"
         buttons.append(InlineKeyboardButton(text, callback_data=f"service_{service_id}_{car_id}_{page}"))
 
@@ -139,27 +116,13 @@ def create_services_keyboard(
 
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"service_page_{car_id}_{page - 1}_{group_id or 0}"))
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"service_page_{car_id}_{page - 1}"))
     nav_buttons.append(InlineKeyboardButton(f"Стр {page + 1}/{max_page + 1}", callback_data="noop"))
     if page < max_page:
-        nav_buttons.append(InlineKeyboardButton("Вперёд ➡️", callback_data=f"service_page_{car_id}_{page + 1}_{group_id or 0}"))
+        nav_buttons.append(InlineKeyboardButton("Вперёд ➡️", callback_data=f"service_page_{car_id}_{page + 1}"))
 
     if nav_buttons:
         keyboard.append(nav_buttons)
-
-    price_buttons = []
-    day_active = "✅" if price_mode == "day" else ""
-    night_active = "✅" if price_mode == "night" else ""
-    price_buttons.append(
-        InlineKeyboardButton(f"☀️ Прайс день {day_active}".strip(), callback_data=f"price_day_{car_id}_{page}_{group_id or 0}")
-    )
-    price_buttons.append(
-        InlineKeyboardButton(f"🌙 Прайс ночь {night_active}".strip(), callback_data=f"price_night_{car_id}_{page}_{group_id or 0}")
-    )
-    keyboard.insert(0, price_buttons)
-
-    if group_id:
-        keyboard.append([InlineKeyboardButton("⬅️ Назад к списку", callback_data=f"close_group_{car_id}_{page}")])
 
     edit_text = "✅ Готово" if is_edit_mode else "✏️ Редактировать"
     keyboard.append([
@@ -205,12 +168,6 @@ def toggle_edit_mode(context: CallbackContext, car_id: int) -> bool:
     new_value = not context.user_data.get(f"edit_mode_{car_id}", False)
     context.user_data[f"edit_mode_{car_id}"] = new_value
     return new_value
-
-def get_price_mode(context: CallbackContext) -> str:
-    return context.user_data.get("price_mode", "day")
-
-def set_price_mode(context: CallbackContext, mode: str):
-    context.user_data["price_mode"] = mode
 
 def build_decade_summary(user_id: int) -> str:
     today = date.today()
@@ -358,7 +315,6 @@ async def menu_command(update: Update, context: CallbackContext):
     if not db_user:
         await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
         return
-    context.user_data.setdefault("price_mode", "day")
     has_active = DatabaseManager.get_active_shift(db_user['id']) is not None
     await update.message.reply_text(
         "Меню открыто.",
@@ -406,37 +362,8 @@ async def handle_message(update: Update, context: CallbackContext):
         await update.message.reply_text(
             f"🚗 Машина: {normalized_number}\n"
             f"Выберите услуги:",
-            reply_markup=create_services_keyboard(
-                car_id,
-                0,
-                False,
-                get_price_mode(context)
-            )
+            reply_markup=create_services_keyboard(car_id, 0, False)
         )
-        return
-
-    if context.user_data.get('awaiting_distance'):
-        raw_value = text.replace(" ", "").replace("км", "")
-        if not raw_value.isdigit():
-            await update.message.reply_text("❌ Введите километраж цифрами. Например: 45")
-            return
-        km = int(raw_value)
-        payload = context.user_data.pop('awaiting_distance')
-        car_id = payload["car_id"]
-        service_id = payload["service_id"]
-        page = payload["page"]
-        service = SERVICES.get(service_id)
-        if not service:
-            await update.message.reply_text("❌ Услуга не найдена.")
-            return
-        price = km * service.get("rate_per_km", 0)
-        price_mode = get_price_mode(context)
-        service_name = f"{service['name']} — {km} км"
-        DatabaseManager.add_service_to_car(car_id, service_id, service_name, price)
-        group_id = context.user_data.get(f"group_{car_id}")
-        message, keyboard = render_car_services(context, car_id, page, group_id)
-        if message:
-            await update.message.reply_text(message, reply_markup=keyboard)
         return
 
     # Ожидание цели дня
@@ -521,14 +448,6 @@ async def handle_callback(update: Update, context: CallbackContext):
         await add_service(query, context, data)
     elif data.startswith("service_page_"):
         await change_services_page(query, context, data)
-    elif data.startswith("price_day_") or data.startswith("price_night_"):
-        await change_price_mode(query, context, data)
-    elif data.startswith("open_group_"):
-        await open_group(query, context, data)
-    elif data.startswith("close_group_"):
-        await close_group(query, context, data)
-    elif data.startswith("distance_"):
-        await request_distance(query, context, data)
     elif data.startswith("clear_"):
         await clear_services(query, context, data)
     elif data.startswith("save_"):
@@ -547,10 +466,6 @@ async def handle_callback(update: Update, context: CallbackContext):
         await backup_db(query, context)
     elif data == "reset_data":
         await reset_data(query, context)
-    elif data == "cancel_add_car":
-        await cancel_add_car(query, context)
-    elif data == "cancel_distance":
-        await cancel_distance(query, context)
     elif data.startswith("toggle_edit_"):
         await toggle_edit(query, context, data)
     elif data == "noop":
@@ -763,7 +678,7 @@ async def add_service(query, context, data):
     if not service:
         return
     
-    price = get_current_price(service_id, get_price_mode(context))
+    price = get_current_price(service_id)
 
     if get_edit_mode(context, car_id):
         DatabaseManager.remove_service_from_car(car_id, service_id)
@@ -771,8 +686,8 @@ async def add_service(query, context, data):
         # Добавляем услугу
         DatabaseManager.add_service_to_car(car_id, service_id, service['name'], price)
 
-    group_id = context.user_data.get(f"group_{car_id}")
-    await show_car_services(query, context, car_id, page, group_id)
+    # Обновляем отображение
+    await show_car_services(query, context, car_id, page)
 
 async def clear_services(query, context, data):
     """Очистка услуг"""
@@ -787,21 +702,16 @@ async def clear_services(query, context, data):
     DatabaseManager.clear_car_services(car_id)
     context.user_data.pop(f"edit_mode_{car_id}", None)
     
-    context.user_data.pop(f"group_{car_id}", None)
     await show_car_services(query, context, car_id, page)
 
 async def change_services_page(query, context, data):
     """Перелистывание услуг"""
     parts = data.split('_')
-    if len(parts) < 5:
+    if len(parts) < 4:
         return
     car_id = int(parts[2])
     page = int(parts[3])
-    group_id = int(parts[4])
-    group_value = group_id or None
-    if group_value:
-        context.user_data[f"group_{car_id}"] = group_value
-    await show_car_services(query, context, car_id, page, group_value)
+    await show_car_services(query, context, car_id, page)
 
 async def toggle_edit(query, context, data):
     parts = data.split('_')
@@ -810,83 +720,7 @@ async def toggle_edit(query, context, data):
     car_id = int(parts[2])
     page = int(parts[3])
     toggle_edit_mode(context, car_id)
-    group_id = context.user_data.get(f"group_{car_id}")
-    await show_car_services(query, context, car_id, page, group_id)
-
-async def change_price_mode(query, context, data):
-    parts = data.split('_')
-    if len(parts) < 5:
-        return
-    mode = "day" if parts[1] == "day" else "night"
-    car_id = int(parts[2])
-    page = int(parts[3])
-    group_id = int(parts[4])
-    set_price_mode(context, mode)
-    group_value = group_id or None
-    if group_value:
-        context.user_data[f"group_{car_id}"] = group_value
-    await show_car_services(query, context, car_id, page, group_value)
-
-async def open_group(query, context, data):
-    parts = data.split('_')
-    if len(parts) < 5:
-        return
-    group_id = int(parts[2])
-    car_id = int(parts[3])
-    page = int(parts[4])
-    context.user_data[f"group_{car_id}"] = group_id
-    await show_car_services(query, context, car_id, page, group_id)
-
-async def close_group(query, context, data):
-    parts = data.split('_')
-    if len(parts) < 4:
-        return
-    car_id = int(parts[2])
-    page = int(parts[3])
-    context.user_data.pop(f"group_{car_id}", None)
     await show_car_services(query, context, car_id, page)
-
-async def request_distance(query, context, data):
-    parts = data.split('_')
-    if len(parts) < 4:
-        return
-    service_id = int(parts[1])
-    car_id = int(parts[2])
-    page = int(parts[3])
-    context.user_data['awaiting_distance'] = {
-        "service_id": service_id,
-        "car_id": car_id,
-        "page": page,
-    }
-    await query.edit_message_text(
-        "Введите километраж поездки (только цифры), например: 45",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_distance")]]
-        )
-    )
-
-async def cancel_add_car(query, context):
-    context.user_data.pop('awaiting_car_number', None)
-    await query.edit_message_text("Ок, отменил ввод номера.")
-    user = query.from_user
-    db_user = DatabaseManager.get_user(user.id)
-    has_active = False
-    if db_user:
-        has_active = DatabaseManager.get_active_shift(db_user['id']) is not None
-    await query.message.reply_text(
-        "Выберите действие:",
-        reply_markup=create_main_reply_keyboard(has_active)
-    )
-
-async def cancel_distance(query, context):
-    payload = context.user_data.pop('awaiting_distance', None)
-    if not payload:
-        await query.edit_message_text("Ок.")
-        return
-    car_id = payload["car_id"]
-    page = payload["page"]
-    group_id = context.user_data.get(f"group_{car_id}")
-    await show_car_services(query, context, car_id, page, group_id)
 
 async def save_car(query, context, data):
     """Сохранение машины"""
@@ -920,7 +754,6 @@ async def save_car(query, context, data):
         f"Можете добавить следующую машину."
     )
     context.user_data.pop(f"edit_mode_{car_id}", None)
-    context.user_data.pop(f"group_{car_id}", None)
     await query.message.reply_text(
         "Выберите действие:",
         reply_markup=create_main_reply_keyboard(True)
@@ -1147,10 +980,7 @@ async def add_car_message(update: Update, context: CallbackContext):
         "• А123ВС777\n"
         "• Х340РУ797\n"
         "• В567ТХ799\n\n"
-        "Можно вводить русскими или английскими буквами.",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_add_car")]]
-        )
+        "Можно вводить русскими или английскими буквами."
     )
 
 async def current_shift_message(update: Update, context: CallbackContext):
@@ -1290,7 +1120,8 @@ async def stats_message(update: Update, context: CallbackContext):
         reply_markup=create_main_reply_keyboard(True)
     )
 
-def render_car_services(context: CallbackContext, car_id: int, page: int = 0, group_id: Optional[int] = None):
+async def show_car_services(query, context: CallbackContext, car_id: int, page: int = 0):
+    """Показать услуги машины"""
     car = DatabaseManager.get_car(car_id)
     if not car:
         return None, None
@@ -1305,8 +1136,7 @@ def render_car_services(context: CallbackContext, car_id: int, page: int = 0, gr
 
     edit_mode = get_edit_mode(context, car_id)
     mode_text = "✏️ Режим: удаление" if edit_mode else "➕ Режим: добавление"
-    price_mode = get_price_mode(context)
-
+    
     message = (
         f"🚗 Машина: {car['car_number']}\n"
         f"Итог: {format_money(car['total_amount'])}\n\n"
@@ -1314,17 +1144,11 @@ def render_car_services(context: CallbackContext, car_id: int, page: int = 0, gr
         f"Услуги:\n{services_text}\n"
         f"Выберите ещё:"
     )
-
-    keyboard = create_services_keyboard(car_id, page, edit_mode, price_mode, group_id)
-    return message, keyboard
-
-async def show_car_services(query, context: CallbackContext, car_id: int, page: int = 0, group_id: Optional[int] = None):
-    """Показать услуги машины"""
-    message, keyboard = render_car_services(context, car_id, page, group_id)
-    if not message:
-        await query.edit_message_text("❌ Машина не найдена")
-        return
-    await query.edit_message_text(message, reply_markup=keyboard)
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=create_services_keyboard(car_id, page, edit_mode)
+    )
 
 # ========== ОБРАБОТЧИК ОШИБОК ==========
 
