@@ -325,7 +325,22 @@ async def handle_message(update: Update, context: CallbackContext):
     """Обработка текстовых сообщений"""
     user = update.effective_user
     text = update.message.text.strip()
-    
+
+    # Если ожидаем номер машины, но пользователь нажал меню — отменяем ввод
+    if context.user_data.get('awaiting_car_number') and text in {
+        MENU_OPEN_SHIFT,
+        MENU_ADD_CAR,
+        MENU_CURRENT_SHIFT,
+        MENU_HISTORY,
+        MENU_SETTINGS,
+        MENU_LEADERBOARD,
+        MENU_DECADE,
+        MENU_STATS,
+    }:
+        context.user_data.pop('awaiting_car_number', None)
+        await update.message.reply_text("Ок, ввод номера отменён.")
+        # Продолжаем обработку выбранного пункта меню
+
     # Ожидание номера машины
     if context.user_data.get('awaiting_car_number'):
         # Проверяем валидность номера
@@ -340,6 +355,10 @@ async def handle_message(update: Update, context: CallbackContext):
         
         # Получаем активную смену
         db_user = DatabaseManager.get_user(user.id)
+        if not db_user:
+            await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
+            context.user_data.pop('awaiting_car_number', None)
+            return
         active_shift = DatabaseManager.get_active_shift(db_user['id'])
         
         if not active_shift:
@@ -876,6 +895,20 @@ async def close_shift(query, context, data):
         "Выберите действие:",
         reply_markup=create_main_reply_keyboard(False)
     )
+    context.user_data.pop(f"edit_mode_{car_id}", None)
+    context.user_data.pop(f"group_{car_id}", None)
+    return_shift_id = context.user_data.get("return_shift_id")
+    if return_shift_id:
+        await show_shift_detail(query, context, return_shift_id)
+    else:
+        await query.message.reply_text(
+            "Выберите действие:",
+            reply_markup=create_main_reply_keyboard(True)
+        )
+        user = query.from_user
+        db_user = DatabaseManager.get_user(user.id)
+        if db_user and DatabaseManager.get_active_shift(db_user['id']):
+            await send_goal_status_from_chat(context, query.message.chat_id, db_user['id'])
 
 async def go_back(query, context):
     """Возврат в главное меню"""
