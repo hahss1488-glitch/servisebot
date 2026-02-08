@@ -3,6 +3,8 @@
 Просто работает
 """
 
+raise RuntimeError("🔥🔥🔥 THIS IS NEW CODE 🔥🔥🔥")
+
 import logging
 from datetime import datetime, date
 import csv
