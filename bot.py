@@ -42,16 +42,14 @@ init_database()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
-def get_current_price(service_id: int) -> int:
-    """Получение текущей цены (день/ночь)"""
+def get_current_price(service_id: int, mode: str) -> int:
+    """Получение цены по выбранному прайсу"""
     service = SERVICES.get(service_id)
     if not service:
         return 0
-    
-    hour = datetime.now().hour
-    if 21 <= hour or hour < 9:
-        return service["night_price"]
-    return service["day_price"]
+    if mode == "night":
+        return service.get("night_price", 0)
+    return service.get("day_price", 0)
 
 def format_money(amount: int) -> str:
     """Форматирование денежной суммы"""
@@ -292,6 +290,7 @@ async def start_command(update: Update, context: CallbackContext):
     if update.message:
         # Автоматическая регистрация
         db_user = DatabaseManager.get_user(user.id)
+        context.user_data.setdefault("price_mode", "day")
         
         if not db_user:
             name = user.first_name or user.username or "Пользователь"
@@ -545,7 +544,10 @@ async def add_car(query, context):
         f"• А123ВС777\n"
         f"• Х340РУ797\n"
         f"• В567ТХ799\n\n"
-        f"Можно вводить русскими или английскими буквами."
+        f"Можно вводить русскими или английскими буквами.",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_add_car")]]
+        )
     )
 
 async def current_shift(query, context):
@@ -1122,15 +1124,13 @@ async def show_car_services(query, context: CallbackContext, car_id: int, page: 
     """Показать услуги машины"""
     car = DatabaseManager.get_car(car_id)
     if not car:
-        await query.edit_message_text("❌ Машина не найдена")
-        return
-    
+        return None, None
+
     services = DatabaseManager.get_car_services(car_id)
-    
     services_text = ""
     for service in services:
         services_text += f"• {service['service_name']} ({service['price']}₽) ×{service['quantity']}\n"
-    
+
     if not services_text:
         services_text = "Нет выбранных услуг\n"
 
