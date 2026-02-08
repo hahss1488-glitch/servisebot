@@ -336,6 +336,15 @@ class DatabaseManager:
         return dict(row) if row else None
 
     @staticmethod
+    def delete_car(car_id: int):
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM car_services WHERE car_id = ?", (car_id,))
+        cur.execute("DELETE FROM cars WHERE id = ?", (car_id,))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
     def get_car_services(car_id: int) -> List[Dict]:
         conn = get_connection()
         cur = conn.cursor()
