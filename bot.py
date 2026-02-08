@@ -1142,6 +1142,20 @@ async def current_shift_message(update: Update, context: CallbackContext):
         f"Машин: {len(cars)}\n"
         f"Сумма: {format_money(total)}\n\n"
     )
+    context.user_data.pop(f"edit_mode_{car_id}", None)
+    context.user_data.pop(f"group_{car_id}", None)
+    return_shift_id = context.user_data.get("return_shift_id")
+    if return_shift_id:
+        await show_shift_detail(query, context, return_shift_id)
+    else:
+        await query.message.reply_text(
+            "Выберите действие:",
+            reply_markup=create_main_reply_keyboard(True)
+        )
+        user = query.from_user
+        db_user = DatabaseManager.get_user(user.id)
+        if db_user and DatabaseManager.get_active_shift(db_user['id']):
+            await send_goal_status_from_chat(context, query.message.chat_id, db_user['id'])
 
     if cars:
         message += "Машины в смене:\n"
