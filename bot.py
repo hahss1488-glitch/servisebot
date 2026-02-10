@@ -36,6 +36,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+APP_VERSION = "2026.02.10-hotfix-2"
 
 # Инициализация базы данных
 init_database()
@@ -295,6 +296,11 @@ async def start_command(update: Update, context: CallbackContext):
         if not db_user:
             name = user.first_name or user.username or "Пользователь"
             DatabaseManager.register_user(user.id, name)
+            db_user = DatabaseManager.get_user(user.id)
+
+        if not db_user:
+            await update.message.reply_text("❌ Не удалось зарегистрировать пользователя. Повторите /start")
+            return
         
         # Простое приветствие
         has_active = False
@@ -304,6 +310,7 @@ async def start_command(update: Update, context: CallbackContext):
         await update.message.reply_text(
             f"👋 Привет!\n"
             f"Я бот для учёта услуг на СТО.\n\n"
+            f"Версия: {APP_VERSION}\n\n"
             f"Выберите действие:",
             reply_markup=create_main_reply_keyboard(has_active)
         )
@@ -1332,9 +1339,10 @@ def main():
     application.add_error_handler(error_handler)
     
     # Запуск бота
-    logger.info("🤖 Бот запускается...")
+    logger.info(f"🤖 Бот запускается... Версия: {APP_VERSION}")
     print("=" * 60)
     print("🚀 БОТ ДЛЯ УЧЁТА УСЛУГ - УПРОЩЕННАЯ ВЕРСИЯ")
+    print(f"🔖 Версия: {APP_VERSION}")
     print("✅ Просто работает")
     print("=" * 60)
     
