@@ -43,7 +43,7 @@ init_database()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
-def get_current_price(service_id: int, mode: str) -> int:
+def get_current_price(service_id: int, mode: str = "day") -> int:
     """Получение цены по выбранному прайсу"""
     service = SERVICES.get(service_id)
     if not service:
@@ -133,6 +133,12 @@ def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = Fa
     ])
 
     return InlineKeyboardMarkup(keyboard)
+
+
+def build_history_keyboard(shifts) -> InlineKeyboardMarkup:
+    """Простая клавиатура для блока истории."""
+    del shifts  # оставляем для совместимости, пока пагинация не используется
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]])
 
 def parse_datetime(value):
     if isinstance(value, datetime):
@@ -457,63 +463,15 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text("❌ Услуга не найдена.")
             return
         price = km * service.get("rate_per_km", 0)
-        price_mode = get_price_mode(context)
         service_name = f"{service['name']} — {km} км"
         DatabaseManager.add_service_to_car(car_id, service_id, service_name, price)
-        group_id = context.user_data.get(f"group_{car_id}")
-        message, keyboard = render_car_services(context, car_id, page, group_id)
-        if message:
-            await update.message.reply_text(message, reply_markup=keyboard)
-        return
-
-    # Ожидание цели дня
-    if context.user_data.get('awaiting_goal'):
-        raw_value = text.replace(" ", "").replace("₽", "")
-        if not raw_value.isdigit():
-            await update.message.reply_text("❌ Введите сумму цифрами. Например: 5000")
-            return
-        goal_value = int(raw_value)
-        db_user = DatabaseManager.get_user(user.id)
-        if not db_user:
-            await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
-            return
-        DatabaseManager.set_daily_goal(db_user['id'], goal_value)
-        context.user_data.pop('awaiting_goal', None)
-        has_active = DatabaseManager.get_active_shift(db_user['id']) is not None
-        await update.message.reply_text(
-            f"✅ Цель дня обновлена: {format_money(goal_value)}\n\n{get_goal_text(db_user['id'])}",
-            reply_markup=create_main_reply_keyboard(has_active)
-        )
-        await send_goal_status(update, context, db_user['id'])
-        return
-
-    # Обработка кнопок главного меню (reply клавиатура)
-    if text in {
-        MENU_OPEN_SHIFT,
-        MENU_ADD_CAR,
-        MENU_CURRENT_SHIFT,
-        MENU_HISTORY,
-        MENU_SETTINGS,
-        MENU_LEADERBOARD,
-        MENU_DECADE,
-        MENU_STATS,
-    }:
-        if text == MENU_OPEN_SHIFT:
-            await open_shift_message(update, context)
-        elif text == MENU_ADD_CAR:
-            await add_car_message(update, context)
-        elif text == MENU_CURRENT_SHIFT:
-            await current_shift_message(update, context)
-        elif text == MENU_HISTORY:
-            await history_message(update, context)
-        elif text == MENU_SETTINGS:
-            await settings_message(update, context)
-        elif text == MENU_LEADERBOARD:
-            await leaderboard_message(update, context)
-        elif text == MENU_DECADE:
-            await decade_message(update, context)
-        elif text == MENU_STATS:
-            await stats_message(update, context)
+        car = DatabaseManager.get_car(car_id)
+        if car:
+            await update.message.reply_text(
+                f"✅ Добавлено: {service_name} ({format_money(price)})\n"
+                f"Текущая сумма по машине: {format_money(car['total_amount'])}",
+                reply_markup=create_services_keyboard(car_id, page, get_edit_mode(context, car_id))
+            )
         return
     
     await update.message.reply_text(
@@ -574,6 +532,15 @@ async def handle_callback(update: Update, context: CallbackContext):
         await close_shift(query, context, data)
     elif data == "back":
         await go_back(query, context)
+    elif data == "cancel_add_car":
+        context.user_data.pop('awaiting_car_number', None)
+        await query.edit_message_text("Ок, добавление машины отменено.")
+        db_user = DatabaseManager.get_user(user.id)
+        has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
+        await query.message.reply_text(
+            "Выберите действие:",
+            reply_markup=create_main_reply_keyboard(has_active)
+        )
     else:
         await query.edit_message_text("❌ Неизвестная команда")
 
@@ -602,7 +569,7 @@ async def open_shift(query, context):
         return
     
     # Создаём новую смену
-    shift_id = DatabaseManager.start_shift(db_user['id'])
+    DatabaseManager.start_shift(db_user['id'])
     
     await query.edit_message_text(
         f"✅ Смена открыта!\n"
@@ -639,12 +606,12 @@ async def add_car(query, context):
     context.user_data['awaiting_car_number'] = True
     
     await query.edit_message_text(
-        f"Введите номер машины:\n\n"
-        f"Примеры правильных номеров:\n"
-        f"• А123ВС777\n"
-        f"• Х340РУ797\n"
-        f"• В567ТХ799\n\n"
-        f"Можно вводить русскими или английскими буквами.",
+        "Введите номер машины:\n\n"
+        "Примеры правильных номеров:\n"
+        "• А123ВС777\n"
+        "• Х340РУ797\n"
+        "• В567ТХ799\n\n"
+        "Можно вводить русскими или английскими буквами.",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_add_car")]]
         )
@@ -902,20 +869,6 @@ async def close_shift(query, context, data):
         "Выберите действие:",
         reply_markup=create_main_reply_keyboard(False)
     )
-    context.user_data.pop(f"edit_mode_{car_id}", None)
-    context.user_data.pop(f"group_{car_id}", None)
-    return_shift_id = context.user_data.get("return_shift_id")
-    if return_shift_id:
-        await show_shift_detail(query, context, return_shift_id)
-    else:
-        await query.message.reply_text(
-            "Выберите действие:",
-            reply_markup=create_main_reply_keyboard(True)
-        )
-        user = query.from_user
-        db_user = DatabaseManager.get_user(user.id)
-        if db_user and DatabaseManager.get_active_shift(db_user['id']):
-            await send_goal_status_from_chat(context, query.message.chat_id, db_user['id'])
 
 async def go_back(query, context):
     """Возврат в главное меню"""
@@ -965,20 +918,6 @@ async def leaderboard(query, context):
         "Выберите действие:",
         reply_markup=create_main_reply_keyboard(True)
     )
-    context.user_data.pop(f"edit_mode_{car_id}", None)
-    context.user_data.pop(f"group_{car_id}", None)
-    return_shift_id = context.user_data.get("return_shift_id")
-    if return_shift_id:
-        await show_shift_detail(query, context, return_shift_id)
-    else:
-        await query.message.reply_text(
-            "Выберите действие:",
-            reply_markup=create_main_reply_keyboard(True)
-        )
-        user = query.from_user
-        db_user = DatabaseManager.get_user(user.id)
-        if db_user and DatabaseManager.get_active_shift(db_user['id']):
-            await send_goal_status_from_chat(context, query.message.chat_id, db_user['id'])
 
 async def decade_callback(query, context):
     user = query.from_user
@@ -1026,20 +965,6 @@ async def export_csv(query, context):
         "Выберите действие:",
         reply_markup=create_main_reply_keyboard(True)
     )
-    context.user_data.pop(f"edit_mode_{car_id}", None)
-    context.user_data.pop(f"group_{car_id}", None)
-    return_shift_id = context.user_data.get("return_shift_id")
-    if return_shift_id:
-        await show_shift_detail(query, context, return_shift_id)
-    else:
-        await query.message.reply_text(
-            "Выберите действие:",
-            reply_markup=create_main_reply_keyboard(True)
-        )
-        user = query.from_user
-        db_user = DatabaseManager.get_user(user.id)
-        if db_user and DatabaseManager.get_active_shift(db_user['id']):
-            await send_goal_status_from_chat(context, query.message.chat_id, db_user['id'])
 
 async def backup_db(query, context):
     user = query.from_user
@@ -1149,20 +1074,6 @@ async def current_shift_message(update: Update, context: CallbackContext):
         f"Машин: {len(cars)}\n"
         f"Сумма: {format_money(total)}\n\n"
     )
-    context.user_data.pop(f"edit_mode_{car_id}", None)
-    context.user_data.pop(f"group_{car_id}", None)
-    return_shift_id = context.user_data.get("return_shift_id")
-    if return_shift_id:
-        await show_shift_detail(query, context, return_shift_id)
-    else:
-        await query.message.reply_text(
-            "Выберите действие:",
-            reply_markup=create_main_reply_keyboard(True)
-        )
-        user = query.from_user
-        db_user = DatabaseManager.get_user(user.id)
-        if db_user and DatabaseManager.get_active_shift(db_user['id']):
-            await send_goal_status_from_chat(context, query.message.chat_id, db_user['id'])
 
     if cars:
         message += "Машины в смене:\n"
@@ -1316,7 +1227,7 @@ async def error_handler(update: Update, context: CallbackContext):
                 "❌ Произошла ошибка.\n"
                 "Попробуйте ещё раз или перезапустите бота командой /start"
             )
-        except:
+        except Exception:
             pass
 
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========

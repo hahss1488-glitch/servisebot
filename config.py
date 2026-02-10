@@ -183,7 +183,7 @@ def validate_car_number(text: str) -> tuple[bool, str, str]:
                 return True, normalized, ""
         
         # Показываем пример правильного формата
-        return False, normalized, f"Неверный формат. Пример: А123ВС777"
+        return False, normalized, "Неверный формат. Пример: А123ВС777"
     
     return True, normalized, ""
 
