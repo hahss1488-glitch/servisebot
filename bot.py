@@ -1625,6 +1625,177 @@ async def delete_day_callback(query, context, data):
     )
     await cleanup_month(query, context, f"cleanup_month_{day[:7]}")
 
+
+async def notify_decade_change_if_needed(update: Update, context: CallbackContext, user_id: int):
+    current_idx, current_start, current_end, current_key, _ = get_decade_period(date.today())
+    last_key = DatabaseManager.get_last_decade_notified(user_id)
+
+    if not last_key:
+        DatabaseManager.set_last_decade_notified(user_id, current_key)
+        return
+
+    if last_key == current_key:
+        return
+
+    try:
+        year_s, month_s, decade_s = last_key.split("-")
+        year = int(year_s)
+        month = int(month_s)
+        idx = int(decade_s.replace("D", ""))
+    except Exception:
+        DatabaseManager.set_last_decade_notified(user_id, current_key)
+        return
+
+    if idx == 1:
+        start_day, end_day = 1, 10
+    elif idx == 2:
+        start_day, end_day = 11, 20
+    else:
+        start_day = 21
+        end_day = calendar.monthrange(year, month)[1]
+
+    prev_start = date(year, month, start_day)
+    prev_end = date(year, month, end_day)
+    total = DatabaseManager.get_user_total_between_dates(user_id, prev_start.isoformat(), prev_end.isoformat())
+
+    text = (
+        "🔔 Декада сменилась!\n"
+        f"Закрыта декада: {format_decade_range(prev_start, prev_end)}\n"
+        f"Итог за период: {format_money(total)}\n\n"
+        f"Текущая декада: {current_idx}-я ({format_decade_range(current_start, current_end)})"
+    )
+
+    if update.message:
+        await update.message.reply_text(text)
+    elif update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(text)
+
+    DatabaseManager.set_last_decade_notified(user_id, current_key)
+
+
+async def toggle_price_mode(query, context):
+    user = query.from_user
+    db_user = DatabaseManager.get_user(user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    current = get_price_mode(context, db_user['id'])
+    new_mode = "night" if current == "day" else "day"
+    context.user_data["price_mode"] = new_mode
+    DatabaseManager.set_price_mode(db_user['id'], new_mode)
+    label = "🌙 Ночной" if new_mode == "night" else "☀️ Дневной"
+    await query.edit_message_text(f"✅ Прайс переключен: {label}")
+
+
+async def cleanup_data_menu(query, context):
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    months = DatabaseManager.get_user_months_with_data(db_user['id'])
+    if not months:
+        await query.edit_message_text("Пока нет данных для редактирования.")
+        return
+
+    keyboard = []
+    for ym in months:
+        year, month = ym.split('-')
+        month_i = int(month)
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{MONTH_NAMES[month_i].capitalize()} {year}",
+                callback_data=f"cleanup_month_{ym}",
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="settings")])
+    await query.edit_message_text(
+        "🧹 Выберите месяц для редактирования:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def cleanup_month(query, context, data):
+    ym = data.replace("cleanup_month_", "")
+    year, month = ym.split('-')
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    days = DatabaseManager.get_month_days_with_totals(db_user['id'], int(year), int(month))
+    if not days:
+        await query.edit_message_text("В этом месяце нет данных.")
+        return
+
+    keyboard = []
+    for day_info in days:
+        day_value = day_info['day']
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{day_value} • машин: {day_info['cars_count']} • {format_money(day_info['total_amount'])}",
+                callback_data=f"cleanup_day_{day_value}",
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 К месяцам", callback_data="cleanup_data")])
+    await query.edit_message_text("Выберите день:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def cleanup_day(query, context, data):
+    day = data.replace("cleanup_day_", "")
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    cars = DatabaseManager.get_cars_for_day(db_user['id'], day)
+    if not cars:
+        await query.edit_message_text("За этот день машин нет.")
+        return
+
+    message = f"🗓️ {day}\n\n"
+    keyboard = []
+    for car in cars:
+        message += f"• #{car['id']} {car['car_number']} — {format_money(car['total_amount'])}\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🗑️ Удалить {car['car_number']}",
+                callback_data=f"delcar_{car['id']}_{day}",
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton("⚠️ Удалить весь день", callback_data=f"delday_{day}")])
+    keyboard.append([InlineKeyboardButton("🔙 К дням", callback_data=f"cleanup_month_{day[:7]}")])
+    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def delete_car_callback(query, context, data):
+    body = data.replace("delcar_", "")
+    car_id_s, day = body.split("_", 1)
+    car_id = int(car_id_s)
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    ok = DatabaseManager.delete_car_for_user(db_user['id'], car_id)
+    if ok:
+        await query.answer("Машина удалена")
+    await cleanup_day(query, context, f"cleanup_day_{day}")
+
+
+async def delete_day_callback(query, context, data):
+    day = data.replace("delday_", "")
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    deleted = DatabaseManager.delete_day_data(db_user['id'], day)
+    await query.edit_message_text(f"✅ Удалено машин за день {day}: {deleted}")
+    await cleanup_month(query, context, f"cleanup_month_{day[:7]}")
+
 # ========== ОБРАБОТЧИК ОШИБОК ==========
 
 async def error_handler(update: Update, context: CallbackContext):
