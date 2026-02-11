@@ -38,8 +38,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-APP_VERSION = "2026.02.11-hotfix-4"
-APP_UPDATED_AT = "2026-02-11 21:55 (Europe/Moscow)"
+APP_VERSION = "2026.02.11-hotfix-5"
+APP_UPDATED_AT = "2026-02-11 22:40 (Europe/Moscow)"
 APP_TIMEZONE = "Europe/Moscow"
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
 
@@ -140,22 +140,37 @@ def create_main_reply_keyboard(has_active_shift: bool = False) -> ReplyKeyboardM
         input_field_placeholder="Выберите действие ниже"
     )
 
-def get_service_order() -> List[int]:
+def get_service_order(user_id: int | None = None) -> List[int]:
     visible = [
         (service_id, service)
         for service_id, service in SERVICES.items()
         if not service.get("hidden")
     ]
-    visible.sort(key=lambda item: (item[1].get("priority", 999), item[1].get("order", 999), item[0]))
+
+    usage = DatabaseManager.get_user_service_usage(user_id) if user_id else {}
+    visible.sort(
+        key=lambda item: (
+            -usage.get(item[0], 0),
+            item[1].get("priority", 999),
+            item[1].get("order", 999),
+            item[0],
+        )
+    )
     return [service_id for service_id, _ in visible]
 
 def chunk_buttons(buttons: List[InlineKeyboardButton], columns: int) -> List[List[InlineKeyboardButton]]:
     return [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
 
-def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = False, mode: str = "day") -> InlineKeyboardMarkup:
+def create_services_keyboard(
+    car_id: int,
+    page: int = 0,
+    is_edit_mode: bool = False,
+    mode: str = "day",
+    user_id: int | None = None,
+) -> InlineKeyboardMarkup:
     """Клавиатура выбора услуг (с колонками и перелистыванием)"""
-    service_ids = get_service_order()
-    per_page = 12
+    service_ids = get_service_order(user_id)
+    per_page = 10
     max_page = max((len(service_ids) - 1) // per_page, 0)
     page = max(0, min(page, max_page))
 
@@ -172,8 +187,7 @@ def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = Fa
         elif service.get("kind") == "distance":
             text = f"{clean_name} (по км)"
         else:
-            price = get_current_price(service_id, mode)
-            text = f"{clean_name} ({price}₽)"
+            text = clean_name
         buttons.append(InlineKeyboardButton(text, callback_data=f"service_{service_id}_{car_id}_{page}"))
 
     keyboard = chunk_buttons(buttons, 3)
@@ -184,18 +198,21 @@ def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = Fa
     nav_buttons.append(InlineKeyboardButton(f"Стр {page + 1}/{max_page + 1}", callback_data="noop"))
     if page < max_page:
         nav_buttons.append(InlineKeyboardButton("Вперёд ➡️", callback_data=f"service_page_{car_id}_{page + 1}"))
-
     if nav_buttons:
         keyboard.append(nav_buttons)
 
     mode_label = "🌞 День" if mode == "day" else "🌙 Ночь"
+    keyboard.append([
+        InlineKeyboardButton("🔎 Поиск", callback_data=f"service_search_{car_id}_{page}"),
+        InlineKeyboardButton("🧩 Комбо", callback_data=f"combo_menu_{car_id}_{page}"),
+    ])
     keyboard.append([InlineKeyboardButton(f"🔁 Изменить прайс: {mode_label}", callback_data=f"toggle_price_car_{car_id}_{page}")])
 
     edit_text = "✅ Готово" if is_edit_mode else "✏️ Редактировать"
     keyboard.append([
         InlineKeyboardButton(edit_text, callback_data=f"toggle_edit_{car_id}_{page}"),
         InlineKeyboardButton("🗑️ Очистить всё", callback_data=f"clear_{car_id}_{page}"),
-        InlineKeyboardButton("💾 Сохранить", callback_data=f"save_{car_id}")
+        InlineKeyboardButton("💾 Сохранить", callback_data=f"save_{car_id}"),
     ])
 
     return InlineKeyboardMarkup(keyboard)
@@ -229,10 +246,14 @@ def get_goal_text(user_id: int) -> str:
 
     today_total = DatabaseManager.get_user_total_for_date(user_id, now_local().strftime("%Y-%m-%d"))
     percent = min(int((today_total / goal) * 100) if goal else 0, 100)
+    filled = min(percent // 10, 10)
+    bar = "🟩" * filled + "⬜" * (10 - filled)
     return (
         f"🎯 Цель дня: {format_money(goal)}\n"
-        f"Сделано: {format_money(today_total)} ({percent}%)"
+        f"Сделано: {format_money(today_total)} ({percent}%)\n"
+        f"Прогресс: {bar}"
     )
+
 
 def get_edit_mode(context: CallbackContext, car_id: int) -> bool:
     return context.user_data.get(f"edit_mode_{car_id}", False)
@@ -266,6 +287,12 @@ def build_decade_summary(user_id: int) -> str:
     )
 
     _, current_start, current_end, _, current_title = get_decade_period(today)
+    top_services = DatabaseManager.get_top_services_between_dates(
+        user_id, current_start.isoformat(), current_end.isoformat(), limit=3
+    )
+    top_cars = DatabaseManager.get_top_cars_between_dates(
+        user_id, current_start.isoformat(), current_end.isoformat(), limit=3
+    )
 
     message = (
         "📆 ДЕКАДЫ ПО КАЛЕНДАРЮ\n\n"
@@ -275,7 +302,19 @@ def build_decade_summary(user_id: int) -> str:
         f"2-я декада ({format_decade_range(second_start, second_end)}): {format_money(second_total)}\n"
         f"3-я декада ({format_decade_range(third_start, third_end)}): {format_money(third_total)}\n"
     )
+
+    if top_services:
+        message += "\nТоп услуг текущей декады:\n"
+        for item in top_services:
+            message += f"• {plain_service_name(item['service_name'])} — {item['total_count']}\n"
+
+    if top_cars:
+        message += "\nТоп машин текущей декады:\n"
+        for item in top_cars:
+            message += f"• {item['car_number']} — {format_money(item['total_amount'])}\n"
+
     return message
+
 
 def build_stats_summary(user_id: int) -> str:
     services = DatabaseManager.get_service_stats(user_id)
@@ -470,7 +509,7 @@ async def handle_message(update: Update, context: CallbackContext):
         await update.message.reply_text(
             f"🚗 Машина: {normalized_number}\n"
             f"Выберите услуги:",
-            reply_markup=create_services_keyboard(car_id, 0, False, get_price_mode(context, db_user["id"]))
+            reply_markup=create_services_keyboard(car_id, 0, False, get_price_mode(context, db_user["id"]), db_user["id"])
         )
         await send_goal_status(update, context, db_user["id"])
         return
@@ -495,6 +534,100 @@ async def handle_message(update: Update, context: CallbackContext):
         )
         await send_goal_status(update, context, db_user['id'])
         await notify_decade_change_if_needed(update, context, db_user['id'])
+        return
+
+    if context.user_data.get('awaiting_service_search'):
+        query_text = text.lower().strip()
+        payload = context.user_data.pop('awaiting_service_search')
+        car_id = payload["car_id"]
+        page = payload["page"]
+        db_user = DatabaseManager.get_user(user.id)
+        user_id = db_user['id'] if db_user else None
+
+        matches = []
+        for service_id in get_service_order(user_id):
+            service = SERVICES.get(service_id, {})
+            name = plain_service_name(service.get("name", ""))
+            if query_text in name.lower():
+                matches.append((service_id, service))
+            if len(matches) >= 12:
+                break
+
+        if not matches:
+            await update.message.reply_text("Ничего не найдено. Попробуйте другое слово.")
+            return
+
+        keyboard = []
+        for service_id, service in matches:
+            name = plain_service_name(service["name"])
+            keyboard.append([InlineKeyboardButton(name, callback_data=f"service_{service_id}_{car_id}_{page}")])
+        keyboard.append([InlineKeyboardButton("⬅️ К списку услуг", callback_data=f"back_to_services_{car_id}_{page}")])
+
+        search_message_id = context.user_data.get("search_message_id")
+        search_chat_id = context.user_data.get("search_chat_id")
+        if search_message_id and search_chat_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=search_chat_id,
+                    message_id=search_message_id,
+                    text="Результаты поиска:",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                return
+            except Exception:
+                pass
+
+        await update.message.reply_text("Результаты поиска:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+
+    if context.user_data.get('awaiting_combo_name'):
+        combo_name = text.strip()
+        payload = context.user_data.pop('awaiting_combo_name')
+        service_ids = payload.get("service_ids", [])
+        car_id = payload.get("car_id")
+        page = payload.get("page", 0)
+        db_user = DatabaseManager.get_user(user.id)
+        if not db_user:
+            await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
+            return
+        if not combo_name:
+            await update.message.reply_text("Название не может быть пустым")
+            return
+        if not service_ids:
+            await update.message.reply_text("В этой машине нет услуг для сохранения комбо.")
+            return
+
+        DatabaseManager.save_user_combo(db_user['id'], combo_name, service_ids)
+        await update.message.reply_text(f"✅ Комбо «{combo_name}» сохранено.")
+        if car_id:
+            await update.message.reply_text(
+                "Возвращаю список услуг:",
+                reply_markup=create_services_keyboard(
+                    car_id,
+                    page,
+                    get_edit_mode(context, car_id),
+                    get_price_mode(context, db_user['id']),
+                    db_user['id'],
+                ),
+            )
+        return
+
+    if context.user_data.get('awaiting_combo_rename'):
+        new_name = text.strip()
+        combo_id = context.user_data.pop('awaiting_combo_rename')
+        db_user = DatabaseManager.get_user(user.id)
+        if not db_user:
+            await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
+            return
+        if not new_name:
+            await update.message.reply_text("Название не может быть пустым")
+            return
+        ok = DatabaseManager.update_combo_name(combo_id, db_user['id'], new_name)
+        if ok:
+            await update.message.reply_text(f"✅ Комбо переименовано: {new_name}")
+        else:
+            await update.message.reply_text("❌ Не удалось переименовать комбо")
         return
 
     # Обработка кнопок главного меню (reply клавиатура)
@@ -547,11 +680,12 @@ async def handle_message(update: Update, context: CallbackContext):
         service_name = f"{plain_service_name(service['name'])} — {km} км"
         DatabaseManager.add_service_to_car(car_id, service_id, service_name, price)
         car = DatabaseManager.get_car(car_id)
+        db_user = DatabaseManager.get_user(user.id)
         if car:
             await update.message.reply_text(
                 f"✅ Добавлено: {service_name} ({format_money(price)})\n"
                 f"Текущая сумма по машине: {format_money(car['total_amount'])}",
-                reply_markup=create_services_keyboard(car_id, page, get_edit_mode(context, car_id), get_price_mode(context))
+                reply_markup=create_services_keyboard(car_id, page, get_edit_mode(context, car_id), get_price_mode(context), db_user["id"] if db_user else None)
             )
         return
     
@@ -587,6 +721,26 @@ async def handle_callback(update: Update, context: CallbackContext):
         await change_services_page(query, context, data)
     elif data.startswith("toggle_price_car_"):
         await toggle_price_mode_for_car(query, context, data)
+    elif data.startswith("service_search_"):
+        await start_service_search(query, context, data)
+    elif data.startswith("search_pick_"):
+        await apply_search_pick(query, context, data)
+    elif data.startswith("search_text_"):
+        await search_enter_text_mode(query, context, data)
+    elif data.startswith("combo_menu_"):
+        await show_combo_menu(query, context, data)
+    elif data.startswith("combo_apply_"):
+        await apply_combo_to_car(query, context, data)
+    elif data.startswith("combo_save_from_car_"):
+        await save_combo_from_car(query, context, data)
+    elif data.startswith("combo_delete_prompt_"):
+        await delete_combo_prompt(query, context, data)
+    elif data.startswith("combo_delete_confirm_"):
+        await delete_combo(query, context, data)
+    elif data.startswith("combo_edit_"):
+        await combo_edit_menu(query, context, data)
+    elif data.startswith("combo_rename_"):
+        await combo_start_rename(query, context, data)
     elif data.startswith("childsvc_"):
         await add_group_child_service(query, context, data)
     elif data.startswith("back_to_services_"):
@@ -594,6 +748,8 @@ async def handle_callback(update: Update, context: CallbackContext):
     elif data.startswith("service_"):
         await add_service(query, context, data)
     elif data.startswith("clear_"):
+        await clear_services_prompt(query, context, data)
+    elif data.startswith("confirm_clear_"):
         await clear_services(query, context, data)
     elif data.startswith("save_"):
         await save_car(query, context, data)
@@ -615,13 +771,17 @@ async def handle_callback(update: Update, context: CallbackContext):
         await toggle_price_mode(query, context)
     elif data == "cleanup_data":
         await cleanup_data_menu(query, context)
+    elif data == "combo_settings":
+        await combo_settings_menu(query, context)
     elif data.startswith("cleanup_month_"):
         await cleanup_month(query, context, data)
     elif data.startswith("cleanup_day_"):
         await cleanup_day(query, context, data)
     elif data.startswith("delcar_"):
         await delete_car_callback(query, context, data)
-    elif data.startswith("delday_"):
+    elif data.startswith("delday_prompt_"):
+        await delete_day_prompt(query, context, data)
+    elif data.startswith("delday_confirm_"):
         await delete_day_callback(query, context, data)
     elif data.startswith("toggle_edit_"):
         await toggle_edit(query, context, data)
@@ -755,15 +915,10 @@ async def current_shift(query, context):
         for car in cars:
             message += f"• {car['car_number']} - {format_money(car['total_amount'])}\n"
     
-    keyboard = [
-        [InlineKeyboardButton("🚗 Добавить машину", callback_data="add_car")],
-        [InlineKeyboardButton("🔚 Закрыть смену", callback_data=f"close_{active_shift['id']}")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back")]
-    ]
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(message)
+    await query.message.reply_text(
+        "Выберите действие:",
+        reply_markup=create_main_reply_keyboard(True)
     )
 
 async def history(query, context):
@@ -818,6 +973,7 @@ async def settings(query, context):
         [InlineKeyboardButton("📈 Статистика", callback_data="stats")],
         [InlineKeyboardButton("📤 Экспорт CSV", callback_data="export_csv")],
         [InlineKeyboardButton("🗄️ Резервная копия", callback_data="backup_db")],
+        [InlineKeyboardButton("🧩 Мои комбинации", callback_data="combo_settings")],
         [InlineKeyboardButton("🧹 Редактировать данные", callback_data="cleanup_data")],
         [InlineKeyboardButton("🗑️ Сбросить данные", callback_data="reset_data")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
@@ -946,19 +1102,281 @@ async def toggle_price_mode_for_car(query, context, data):
     await show_car_services(query, context, car_id, page)
 
 
-async def clear_services(query, context, data):
-    """Очистка услуг"""
+async def start_service_search(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 4:
+        return
+    car_id = int(parts[2])
+    page = int(parts[3])
+
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    user_id = db_user['id'] if db_user else None
+    service_ids = get_service_order(user_id)[:8]
+
+    keyboard = []
+    for service_id in service_ids:
+        service = SERVICES.get(service_id)
+        if not service:
+            continue
+        keyboard.append([
+            InlineKeyboardButton(
+                plain_service_name(service['name']),
+                callback_data=f"search_pick_{service_id}_{car_id}_{page}",
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔤 Ввести текст", callback_data=f"search_text_{car_id}_{page}")])
+    keyboard.append([InlineKeyboardButton("⬅️ К услугам", callback_data=f"back_to_services_{car_id}_{page}")])
+
+    context.user_data["search_message_id"] = query.message.message_id
+    context.user_data["search_chat_id"] = query.message.chat_id
+    await query.edit_message_text(
+        "🔎 Быстрый поиск услуг\n\n"
+        "• Нажмите на услугу из списка ниже\n"
+        "• Или нажмите «Ввести текст» и отправьте часть названия",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def apply_search_pick(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 5:
+        return
+    service_id = int(parts[2])
+    car_id = int(parts[3])
+    page = int(parts[4])
+    await add_service(query, context, f"service_{service_id}_{car_id}_{page}")
+
+
+async def search_enter_text_mode(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 4:
+        return
+    car_id = int(parts[2])
+    page = int(parts[3])
+    context.user_data['awaiting_service_search'] = {"car_id": car_id, "page": page}
+    context.user_data["search_message_id"] = query.message.message_id
+    context.user_data["search_chat_id"] = query.message.chat_id
+    await query.answer("Введите текст в чат")
+
+
+async def show_combo_menu(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 4:
+        return
+    car_id = int(parts[2])
+    page = int(parts[3])
+
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    combos = DatabaseManager.get_user_combos(db_user['id'])
+    keyboard = []
+    for combo in combos:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"▶️ {combo['name']}",
+                callback_data=f"combo_apply_{combo['id']}_{car_id}_{page}",
+            ),
+            InlineKeyboardButton(
+                "✏️",
+                callback_data=f"combo_edit_{combo['id']}_{car_id}_{page}",
+            ),
+            InlineKeyboardButton(
+                "🗑️",
+                callback_data=f"combo_delete_prompt_{combo['id']}_{car_id}_{page}",
+            ),
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "💾 Сохранить текущее как комбо",
+            callback_data=f"combo_save_from_car_{car_id}_{page}",
+        )
+    ])
+    keyboard.append([InlineKeyboardButton("⬅️ К услугам", callback_data=f"back_to_services_{car_id}_{page}")])
+
+    text = "🧩 Комбинации услуг\n\nВыберите комбо для применения или сохраните текущее."
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def combo_edit_menu(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 5:
+        return
+    combo_id = int(parts[2])
+    car_id = int(parts[3])
+    page = int(parts[4])
+
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        return
+    combo = DatabaseManager.get_combo(combo_id, db_user['id'])
+    if not combo:
+        await query.answer("Комбо не найдено")
+        return
+
+    services = []
+    for sid in combo.get("service_ids", []):
+        service = SERVICES.get(int(sid))
+        if service:
+            services.append(plain_service_name(service['name']))
+    services_preview = ", ".join(services[:8]) if services else "нет услуг"
+
+    text = (
+        f"🧩 Редактор комбо\n\n"
+        f"Название: {combo['name']}\n"
+        f"Услуг: {len(combo.get('service_ids', []))}\n"
+        f"Состав: {services_preview}"
+    )
+    keyboard = [
+        [InlineKeyboardButton("✏️ Переименовать", callback_data=f"combo_rename_{combo_id}_{car_id}_{page}")],
+        [InlineKeyboardButton("🗑️ Удалить", callback_data=f"combo_delete_prompt_{combo_id}_{car_id}_{page}")],
+        [InlineKeyboardButton("⬅️ Назад к комбо", callback_data=f"combo_menu_{car_id}_{page}")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def combo_start_rename(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 5:
+        return
+    combo_id = int(parts[2])
+    context.user_data['awaiting_combo_rename'] = combo_id
+    await query.answer("Введите новое название в чат")
+
+
+async def apply_combo_to_car(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 5:
+        return
+    combo_id = int(parts[2])
+    car_id = int(parts[3])
+    page = int(parts[4])
+
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        return
+    combo = DatabaseManager.get_combo(combo_id, db_user['id'])
+    if not combo:
+        await query.answer("Комбо не найдено")
+        return
+
+    mode = get_price_mode(context, db_user['id'])
+    added = 0
+    skipped = 0
+    for service_id in combo.get("service_ids", []):
+        service = SERVICES.get(int(service_id))
+        if not service:
+            skipped += 1
+            continue
+        if service.get("kind") == "distance":
+            skipped += 1
+            continue
+        price = get_current_price(int(service_id), mode)
+        DatabaseManager.add_service_to_car(car_id, int(service_id), plain_service_name(service['name']), price)
+        added += 1
+
+    await query.answer(f"Добавлено: {added}, пропущено: {skipped}")
+    await show_car_services(query, context, car_id, page)
+
+
+async def save_combo_from_car(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 6:
+        return
+    car_id = int(parts[4])
+    page = int(parts[5])
+
+    services = DatabaseManager.get_car_services(car_id)
+    service_ids = []
+    for item in services:
+        qty = int(item.get("quantity", 1))
+        service_ids.extend([int(item["service_id"])] * max(1, qty))
+
+    context.user_data['awaiting_combo_name'] = {
+        "service_ids": service_ids,
+        "car_id": car_id,
+        "page": page,
+    }
+    await query.message.reply_text("Введите название для новой комбинации услуг")
+
+
+async def delete_combo_prompt(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 6:
+        return
+    combo_id = int(parts[3])
+    car_id = int(parts[4])
+    page = int(parts[5])
+    keyboard = [
+        [InlineKeyboardButton("✅ Да, удалить", callback_data=f"combo_delete_confirm_{combo_id}_{car_id}_{page}")],
+        [InlineKeyboardButton("⬅️ Отмена", callback_data=f"combo_menu_{car_id}_{page}")],
+    ]
+    await query.edit_message_text("Подтвердите удаление комбо", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def delete_combo(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 6:
+        return
+    combo_id = int(parts[3])
+    car_id = int(parts[4])
+    page = int(parts[5])
+
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        return
+
+    ok = DatabaseManager.delete_combo(combo_id, db_user['id'])
+    await query.answer("Удалено" if ok else "Не найдено")
+    await show_combo_menu(query, context, f"combo_menu_{car_id}_{page}")
+
+
+async def combo_settings_menu(query, context):
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    combos = DatabaseManager.get_user_combos(db_user['id'])
+    text = "🧩 Мои комбинации\n\n"
+    if not combos:
+        text += "Пока нет сохранённых комбинаций.\nСохранить можно прямо на экране машины через кнопку 🧩 Комбо."
+    else:
+        for combo in combos[:10]:
+            text += f"• {combo['name']} ({len(combo.get('service_ids', []))} услуг)\n"
+        text += "\nУдалить/применить можно на экране машины через кнопку 🧩 Комбо."
+
+    await query.edit_message_text(text)
+
+
+async def clear_services_prompt(query, context, data):
     parts = data.split('_')
     if len(parts) < 3:
         return
-    
     car_id = int(parts[1])
     page = int(parts[2])
-    
-    # Очищаем услуги
+    keyboard = [
+        [InlineKeyboardButton("✅ Да, очистить", callback_data=f"confirm_clear_{car_id}_{page}")],
+        [InlineKeyboardButton("⬅️ Отмена", callback_data=f"back_to_services_{car_id}_{page}")],
+    ]
+    await query.edit_message_text("Подтвердите очистку всех услуг у этой машины", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def clear_services(query, context, data):
+    """Очистка услуг"""
+    parts = data.split('_')
+    if len(parts) < 4:
+        return
+
+    car_id = int(parts[2])
+    page = int(parts[3])
+
     DatabaseManager.clear_car_services(car_id)
     context.user_data.pop(f"edit_mode_{car_id}", None)
-    
+
     await show_car_services(query, context, car_id, page)
 
 async def change_services_page(query, context, data):
@@ -1274,15 +1692,9 @@ async def current_shift_message(update: Update, context: CallbackContext):
         for car in cars:
             message += f"• {car['car_number']} - {format_money(car['total_amount'])}\n"
 
-    keyboard = [
-        [InlineKeyboardButton("🚗 Добавить машину", callback_data="add_car")],
-        [InlineKeyboardButton("🔚 Закрыть смену", callback_data=f"close_{active_shift['id']}")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back")]
-    ]
-
     await update.message.reply_text(
         message,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=create_main_reply_keyboard(True)
     )
 
 async def close_shift_message(update: Update, context: CallbackContext):
@@ -1361,6 +1773,7 @@ async def history_message(update: Update, context: CallbackContext):
 async def settings_message(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton("🎯 Цель дня", callback_data="change_goal")],
+        [InlineKeyboardButton("🧩 Мои комбинации", callback_data="combo_settings")],
         [InlineKeyboardButton("🧹 Редактировать данные", callback_data="cleanup_data")],
         [InlineKeyboardButton("🗑️ Сбросить данные", callback_data="reset_data")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
@@ -1441,9 +1854,10 @@ async def show_car_services(query, context: CallbackContext, car_id: int, page: 
         f"Выберите ещё:"
     )
     
+    db_user = DatabaseManager.get_user(query.from_user.id)
     await query.edit_message_text(
         message,
-        reply_markup=create_services_keyboard(car_id, page, edit_mode, get_price_mode(context))
+        reply_markup=create_services_keyboard(car_id, page, edit_mode, get_price_mode(context), db_user["id"] if db_user else None)
     )
 
 
@@ -1589,7 +2003,7 @@ async def cleanup_day(query, context, data):
             )
         ])
 
-    keyboard.append([InlineKeyboardButton("⚠️ Удалить весь день", callback_data=f"delday_{day}")])
+    keyboard.append([InlineKeyboardButton("⚠️ Удалить весь день", callback_data=f"delday_prompt_{day}")])
     keyboard.append([InlineKeyboardButton("🔙 К дням", callback_data=f"cleanup_month_{day[:7]}")])
     await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1610,8 +2024,20 @@ async def delete_car_callback(query, context, data):
     await cleanup_day(query, context, f"cleanup_day_{day}")
 
 
+async def delete_day_prompt(query, context, data):
+    day = data.replace("delday_prompt_", "")
+    keyboard = [
+        [InlineKeyboardButton("✅ Да, удалить день", callback_data=f"delday_confirm_{day}")],
+        [InlineKeyboardButton("⬅️ Отмена", callback_data=f"cleanup_month_{day[:7]}")],
+    ]
+    await query.edit_message_text(
+        f"Удалить все машины за {day}?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
 async def delete_day_callback(query, context, data):
-    day = data.replace("delday_", "")
+    day = data.replace("delday_confirm_", "")
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         await query.edit_message_text("❌ Пользователь не найден")
@@ -1624,96 +2050,6 @@ async def delete_day_callback(query, context, data):
         f"Пустых смен удалено: {removed_shifts}"
     )
     await cleanup_month(query, context, f"cleanup_month_{day[:7]}")
-
-
-async def notify_decade_change_if_needed(update: Update, context: CallbackContext, user_id: int):
-    current_idx, current_start, current_end, current_key, _ = get_decade_period(date.today())
-    last_key = DatabaseManager.get_last_decade_notified(user_id)
-
-    if not last_key:
-        DatabaseManager.set_last_decade_notified(user_id, current_key)
-        return
-
-    if last_key == current_key:
-        return
-
-    try:
-        year_s, month_s, decade_s = last_key.split("-")
-        year = int(year_s)
-        month = int(month_s)
-        idx = int(decade_s.replace("D", ""))
-    except Exception:
-        DatabaseManager.set_last_decade_notified(user_id, current_key)
-        return
-
-    if idx == 1:
-        start_day, end_day = 1, 10
-    elif idx == 2:
-        start_day, end_day = 11, 20
-    else:
-        start_day = 21
-        end_day = calendar.monthrange(year, month)[1]
-
-    prev_start = date(year, month, start_day)
-    prev_end = date(year, month, end_day)
-    total = DatabaseManager.get_user_total_between_dates(user_id, prev_start.isoformat(), prev_end.isoformat())
-
-    text = (
-        "🔔 Декада сменилась!\n"
-        f"Закрыта декада: {format_decade_range(prev_start, prev_end)}\n"
-        f"Итог за период: {format_money(total)}\n\n"
-        f"Текущая декада: {current_idx}-я ({format_decade_range(current_start, current_end)})"
-    )
-
-    if update.message:
-        await update.message.reply_text(text)
-    elif update.callback_query and update.callback_query.message:
-        await update.callback_query.message.reply_text(text)
-
-    DatabaseManager.set_last_decade_notified(user_id, current_key)
-
-
-async def toggle_price_mode(query, context):
-    user = query.from_user
-    db_user = DatabaseManager.get_user(user.id)
-    if not db_user:
-        await query.edit_message_text("❌ Пользователь не найден")
-        return
-
-    current = get_price_mode(context, db_user['id'])
-    new_mode = "night" if current == "day" else "day"
-    context.user_data["price_mode"] = new_mode
-    DatabaseManager.set_price_mode(db_user['id'], new_mode)
-    label = "🌙 Ночной" if new_mode == "night" else "☀️ Дневной"
-    await query.edit_message_text(f"✅ Прайс переключен: {label}")
-
-
-async def cleanup_data_menu(query, context):
-    db_user = DatabaseManager.get_user(query.from_user.id)
-    if not db_user:
-        await query.edit_message_text("❌ Пользователь не найден")
-        return
-
-    months = DatabaseManager.get_user_months_with_data(db_user['id'])
-    if not months:
-        await query.edit_message_text("Пока нет данных для редактирования.")
-        return
-
-    keyboard = []
-    for ym in months:
-        year, month = ym.split('-')
-        month_i = int(month)
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{MONTH_NAMES[month_i].capitalize()} {year}",
-                callback_data=f"cleanup_month_{ym}",
-            )
-        ])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="settings")])
-    await query.edit_message_text(
-        "🧹 Выберите месяц для редактирования:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
 
 
 async def cleanup_month(query, context, data):

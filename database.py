@@ -1,4 +1,5 @@
 import sqlite3
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional
@@ -66,6 +67,16 @@ def init_database():
         daily_goal INTEGER DEFAULT 0,
         price_mode TEXT DEFAULT 'day',
         last_decade_notified TEXT DEFAULT '',
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""")
+
+    # Таблица пользовательских комбинаций услуг
+    cur.execute("""CREATE TABLE IF NOT EXISTS user_combos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        service_ids TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
 
@@ -626,6 +637,151 @@ class DatabaseManager:
         conn.commit()
         conn.close()
         return len(shift_ids)
+
+
+    @staticmethod
+    def get_user_service_usage(user_id: int) -> Dict[int, int]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT cs.service_id, COALESCE(SUM(cs.quantity), 0) AS qty
+            FROM car_services cs
+            JOIN cars c ON c.id = cs.car_id
+            JOIN shifts s ON s.id = c.shift_id
+            WHERE s.user_id = ?
+            GROUP BY cs.service_id""",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return {int(row["service_id"]): int(row["qty"]) for row in rows}
+
+    @staticmethod
+    def get_top_services_between_dates(user_id: int, start_date: str, end_date: str, limit: int = 5) -> List[Dict]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT cs.service_name,
+            SUM(cs.quantity) as total_count,
+            SUM(cs.price * cs.quantity) as total_amount
+            FROM shifts s
+            JOIN cars c ON c.shift_id = s.id
+            JOIN car_services cs ON cs.car_id = c.id
+            WHERE s.user_id = ? AND date(s.start_time) BETWEEN date(?) AND date(?)
+            GROUP BY cs.service_name
+            ORDER BY total_amount DESC
+            LIMIT ?""",
+            (user_id, start_date, end_date, limit)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def get_top_cars_between_dates(user_id: int, start_date: str, end_date: str, limit: int = 5) -> List[Dict]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT c.car_number,
+            COUNT(c.id) as visits,
+            SUM(c.total_amount) as total_amount
+            FROM shifts s
+            JOIN cars c ON c.shift_id = s.id
+            WHERE s.user_id = ? AND date(s.start_time) BETWEEN date(?) AND date(?)
+            GROUP BY c.car_number
+            ORDER BY total_amount DESC
+            LIMIT ?""",
+            (user_id, start_date, end_date, limit)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def save_user_combo(user_id: int, name: str, service_ids: List[int]) -> int:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO user_combos (user_id, name, service_ids) VALUES (?, ?, ?)",
+            (user_id, name, json.dumps(service_ids, ensure_ascii=False))
+        )
+        combo_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return int(combo_id)
+
+    @staticmethod
+    def get_user_combos(user_id: int) -> List[Dict]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM user_combos WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["service_ids"] = json.loads(item.get("service_ids") or "[]")
+            except json.JSONDecodeError:
+                item["service_ids"] = []
+            result.append(item)
+        return result
+
+    @staticmethod
+    def get_combo(combo_id: int, user_id: int) -> Optional[Dict]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM user_combos WHERE id = ? AND user_id = ?", (combo_id, user_id))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        item = dict(row)
+        try:
+            item["service_ids"] = json.loads(item.get("service_ids") or "[]")
+        except json.JSONDecodeError:
+            item["service_ids"] = []
+        return item
+
+    @staticmethod
+    def update_combo_name(combo_id: int, user_id: int, new_name: str) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE user_combos SET name = ? WHERE id = ? AND user_id = ?",
+            (new_name, combo_id, user_id)
+        )
+        updated = cur.rowcount
+        conn.commit()
+        conn.close()
+        return bool(updated)
+
+    @staticmethod
+    def update_combo_services(combo_id: int, user_id: int, service_ids: List[int]) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE user_combos SET service_ids = ? WHERE id = ? AND user_id = ?",
+            (json.dumps(service_ids, ensure_ascii=False), combo_id, user_id)
+        )
+        updated = cur.rowcount
+        conn.commit()
+        conn.close()
+        return bool(updated)
+
+
+    @staticmethod
+    def delete_combo(combo_id: int, user_id: int) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM user_combos WHERE id = ? AND user_id = ?", (combo_id, user_id))
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        return bool(deleted)
 
 
 if __name__ == "__main__":
