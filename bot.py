@@ -36,14 +36,20 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-APP_VERSION = "2026.02.10-hotfix-2"
+APP_VERSION = "2026.02.10-hotfix-3"
+
+MONTH_NAMES = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+    5: "мая", 6: "июня", 7: "июля", 8: "августа",
+    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
+}
 
 # Инициализация базы данных
 init_database()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
-def get_current_price(service_id: int, mode: str) -> int:
+def get_current_price(service_id: int, mode: str = "day") -> int:
     """Получение цены по выбранному прайсу"""
     service = SERVICES.get(service_id)
     if not service:
@@ -56,13 +62,44 @@ def format_money(amount: int) -> str:
     """Форматирование денежной суммы"""
     return f"{amount:,}₽".replace(",", " ")
 
+
+def get_price_mode(context: CallbackContext, user_id: int | None = None) -> str:
+    mode = context.user_data.get("price_mode")
+    if mode in {"day", "night"}:
+        return mode
+    if user_id:
+        mode = DatabaseManager.get_price_mode(user_id)
+        context.user_data["price_mode"] = mode
+        return mode
+    return "day"
+
+
+def format_decade_range(start: date, end: date) -> str:
+    return f"{start.day:02d}.{start.month:02d}–{end.day:02d}.{end.month:02d}"
+
+
+def get_decade_period(target: date | None = None):
+    current = target or date.today()
+    if current.day <= 10:
+        start_day, end_day, idx = 1, 10, 1
+    elif current.day <= 20:
+        start_day, end_day, idx = 11, 20, 2
+    else:
+        start_day, idx = 21, 3
+        end_day = calendar.monthrange(current.year, current.month)[1]
+    start = date(current.year, current.month, start_day)
+    end = date(current.year, current.month, end_day)
+    key = f"{current.year:04d}-{current.month:02d}-D{idx}"
+    title = f"{idx}-я декада: {start.day}-{end.day} {MONTH_NAMES[current.month]}"
+    return idx, start, end, key, title
+
 # ========== КЛАВИАТУРЫ ==========
 
 MENU_OPEN_SHIFT = "📅 Открыть смену"
 MENU_ADD_CAR = "🚗 Добавить машину"
 MENU_CURRENT_SHIFT = "📊 Текущая смена"
 MENU_HISTORY = "📜 История смен"
-MENU_SETTINGS = "⚙️ Настройки"
+MENU_SETTINGS = "⚙️ Настройки и данные"
 MENU_LEADERBOARD = "🏆 Лидеры смены"
 MENU_DECADE = "📆 Зарплата (декады)"
 MENU_STATS = "📈 Статистика"
@@ -95,10 +132,10 @@ def get_service_order() -> List[int]:
 def chunk_buttons(buttons: List[InlineKeyboardButton], columns: int) -> List[List[InlineKeyboardButton]]:
     return [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
 
-def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = False) -> InlineKeyboardMarkup:
+def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = False, mode: str = "day") -> InlineKeyboardMarkup:
     """Клавиатура выбора услуг (с колонками и перелистыванием)"""
     service_ids = get_service_order()
-    per_page = 6
+    per_page = 12
     max_page = max((len(service_ids) - 1) // per_page, 0)
     page = max(0, min(page, max_page))
 
@@ -109,11 +146,11 @@ def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = Fa
     buttons = []
     for service_id in page_ids:
         service = SERVICES[service_id]
-        price = get_current_price(service_id)
+        price = get_current_price(service_id, mode)
         text = f"{service['name']} ({price}₽)"
         buttons.append(InlineKeyboardButton(text, callback_data=f"service_{service_id}_{car_id}_{page}"))
 
-    keyboard = chunk_buttons(buttons, 2)
+    keyboard = chunk_buttons(buttons, 3)
 
     nav_buttons = []
     if page > 0:
@@ -133,6 +170,12 @@ def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = Fa
     ])
 
     return InlineKeyboardMarkup(keyboard)
+
+
+def build_history_keyboard(shifts) -> InlineKeyboardMarkup:
+    """Простая клавиатура для блока истории."""
+    del shifts  # оставляем для совместимости, пока пагинация не используется
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]])
 
 def parse_datetime(value):
     if isinstance(value, datetime):
@@ -193,11 +236,15 @@ def build_decade_summary(user_id: int) -> str:
         user_id, third_start.isoformat(), third_end.isoformat()
     )
 
+    _, current_start, current_end, _, current_title = get_decade_period(today)
+
     message = (
-        "📆 ЗАРПЛАТА ПО ДЕКАДАМ\n\n"
-        f"1–10: {format_money(first_total)}\n"
-        f"11–20: {format_money(second_total)}\n"
-        f"21–конец месяца: {format_money(third_total)}\n"
+        "📆 ДЕКАДЫ ПО КАЛЕНДАРЮ\n\n"
+        f"Сейчас: {current_title}\n"
+        f"Период: {format_decade_range(current_start, current_end)}\n\n"
+        f"1-я декада ({format_decade_range(first_start, first_end)}): {format_money(first_total)}\n"
+        f"2-я декада ({format_decade_range(second_start, second_end)}): {format_money(second_total)}\n"
+        f"3-я декада ({format_decade_range(third_start, third_end)}): {format_money(third_total)}\n"
     )
     return message
 
@@ -291,7 +338,7 @@ async def start_command(update: Update, context: CallbackContext):
     if update.message:
         # Автоматическая регистрация
         db_user = DatabaseManager.get_user(user.id)
-        context.user_data.setdefault("price_mode", "day")
+        context.user_data["price_mode"] = DatabaseManager.get_price_mode(db_user["id"]) if db_user else "day"
         
         if not db_user:
             name = user.first_name or user.username or "Пользователь"
@@ -315,6 +362,7 @@ async def start_command(update: Update, context: CallbackContext):
             reply_markup=create_main_reply_keyboard(has_active)
         )
         await send_goal_status(update, context, db_user['id'])
+        await notify_decade_change_if_needed(update, context, db_user['id'])
 
 async def menu_command(update: Update, context: CallbackContext):
     user = update.effective_user
@@ -327,6 +375,8 @@ async def menu_command(update: Update, context: CallbackContext):
         "Меню открыто.",
         reply_markup=create_main_reply_keyboard(has_active)
     )
+    context.user_data["price_mode"] = DatabaseManager.get_price_mode(db_user["id"])
+    await notify_decade_change_if_needed(update, context, db_user["id"])
 
 async def handle_message(update: Update, context: CallbackContext):
     """Обработка текстовых сообщений"""
@@ -388,7 +438,7 @@ async def handle_message(update: Update, context: CallbackContext):
         await update.message.reply_text(
             f"🚗 Машина: {normalized_number}\n"
             f"Выберите услуги:",
-            reply_markup=create_services_keyboard(car_id, 0, False)
+            reply_markup=create_services_keyboard(car_id, 0, False, get_price_mode(context, db_user["id"]))
         )
         return
 
@@ -411,6 +461,7 @@ async def handle_message(update: Update, context: CallbackContext):
             reply_markup=create_main_reply_keyboard(has_active)
         )
         await send_goal_status(update, context, db_user['id'])
+        await notify_decade_change_if_needed(update, context, db_user['id'])
         return
 
     # Обработка кнопок главного меню (reply клавиатура)
@@ -457,63 +508,15 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text("❌ Услуга не найдена.")
             return
         price = km * service.get("rate_per_km", 0)
-        price_mode = get_price_mode(context)
         service_name = f"{service['name']} — {km} км"
         DatabaseManager.add_service_to_car(car_id, service_id, service_name, price)
-        group_id = context.user_data.get(f"group_{car_id}")
-        message, keyboard = render_car_services(context, car_id, page, group_id)
-        if message:
-            await update.message.reply_text(message, reply_markup=keyboard)
-        return
-
-    # Ожидание цели дня
-    if context.user_data.get('awaiting_goal'):
-        raw_value = text.replace(" ", "").replace("₽", "")
-        if not raw_value.isdigit():
-            await update.message.reply_text("❌ Введите сумму цифрами. Например: 5000")
-            return
-        goal_value = int(raw_value)
-        db_user = DatabaseManager.get_user(user.id)
-        if not db_user:
-            await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
-            return
-        DatabaseManager.set_daily_goal(db_user['id'], goal_value)
-        context.user_data.pop('awaiting_goal', None)
-        has_active = DatabaseManager.get_active_shift(db_user['id']) is not None
-        await update.message.reply_text(
-            f"✅ Цель дня обновлена: {format_money(goal_value)}\n\n{get_goal_text(db_user['id'])}",
-            reply_markup=create_main_reply_keyboard(has_active)
-        )
-        await send_goal_status(update, context, db_user['id'])
-        return
-
-    # Обработка кнопок главного меню (reply клавиатура)
-    if text in {
-        MENU_OPEN_SHIFT,
-        MENU_ADD_CAR,
-        MENU_CURRENT_SHIFT,
-        MENU_HISTORY,
-        MENU_SETTINGS,
-        MENU_LEADERBOARD,
-        MENU_DECADE,
-        MENU_STATS,
-    }:
-        if text == MENU_OPEN_SHIFT:
-            await open_shift_message(update, context)
-        elif text == MENU_ADD_CAR:
-            await add_car_message(update, context)
-        elif text == MENU_CURRENT_SHIFT:
-            await current_shift_message(update, context)
-        elif text == MENU_HISTORY:
-            await history_message(update, context)
-        elif text == MENU_SETTINGS:
-            await settings_message(update, context)
-        elif text == MENU_LEADERBOARD:
-            await leaderboard_message(update, context)
-        elif text == MENU_DECADE:
-            await decade_message(update, context)
-        elif text == MENU_STATS:
-            await stats_message(update, context)
+        car = DatabaseManager.get_car(car_id)
+        if car:
+            await update.message.reply_text(
+                f"✅ Добавлено: {service_name} ({format_money(price)})\n"
+                f"Текущая сумма по машине: {format_money(car['total_amount'])}",
+                reply_markup=create_services_keyboard(car_id, page, get_edit_mode(context, car_id), get_price_mode(context))
+            )
         return
     
     await update.message.reply_text(
@@ -544,10 +547,10 @@ async def handle_callback(update: Update, context: CallbackContext):
         await history(query, context)
     elif data == "settings":
         await settings(query, context)
-    elif data.startswith("service_"):
-        await add_service(query, context, data)
     elif data.startswith("service_page_"):
         await change_services_page(query, context, data)
+    elif data.startswith("service_"):
+        await add_service(query, context, data)
     elif data.startswith("clear_"):
         await clear_services(query, context, data)
     elif data.startswith("save_"):
@@ -566,6 +569,18 @@ async def handle_callback(update: Update, context: CallbackContext):
         await backup_db(query, context)
     elif data == "reset_data":
         await reset_data(query, context)
+    elif data == "toggle_price":
+        await toggle_price_mode(query, context)
+    elif data == "cleanup_data":
+        await cleanup_data_menu(query, context)
+    elif data.startswith("cleanup_month_"):
+        await cleanup_month(query, context, data)
+    elif data.startswith("cleanup_day_"):
+        await cleanup_day(query, context, data)
+    elif data.startswith("delcar_"):
+        await delete_car_callback(query, context, data)
+    elif data.startswith("delday_"):
+        await delete_day_callback(query, context, data)
     elif data.startswith("toggle_edit_"):
         await toggle_edit(query, context, data)
     elif data == "noop":
@@ -574,6 +589,15 @@ async def handle_callback(update: Update, context: CallbackContext):
         await close_shift(query, context, data)
     elif data == "back":
         await go_back(query, context)
+    elif data == "cancel_add_car":
+        context.user_data.pop('awaiting_car_number', None)
+        await query.edit_message_text("Ок, добавление машины отменено.")
+        db_user = DatabaseManager.get_user(user.id)
+        has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
+        await query.message.reply_text(
+            "Выберите действие:",
+            reply_markup=create_main_reply_keyboard(has_active)
+        )
     else:
         await query.edit_message_text("❌ Неизвестная команда")
 
@@ -602,7 +626,7 @@ async def open_shift(query, context):
         return
     
     # Создаём новую смену
-    shift_id = DatabaseManager.start_shift(db_user['id'])
+    DatabaseManager.start_shift(db_user['id'])
     
     await query.edit_message_text(
         f"✅ Смена открыта!\n"
@@ -639,12 +663,12 @@ async def add_car(query, context):
     context.user_data['awaiting_car_number'] = True
     
     await query.edit_message_text(
-        f"Введите номер машины:\n\n"
-        f"Примеры правильных номеров:\n"
-        f"• А123ВС777\n"
-        f"• Х340РУ797\n"
-        f"• В567ТХ799\n\n"
-        f"Можно вводить русскими или английскими буквами.",
+        "Введите номер машины:\n\n"
+        "Примеры правильных номеров:\n"
+        "• А123ВС777\n"
+        "• Х340РУ797\n"
+        "• В567ТХ799\n\n"
+        "Можно вводить русскими или английскими буквами.",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_add_car")]]
         )
@@ -752,6 +776,8 @@ async def settings(query, context):
         [InlineKeyboardButton("📈 Статистика", callback_data="stats")],
         [InlineKeyboardButton("📤 Экспорт CSV", callback_data="export_csv")],
         [InlineKeyboardButton("🗄️ Резервная копия", callback_data="backup_db")],
+        [InlineKeyboardButton("🌗 Переключить прайс (день/ночь)", callback_data="toggle_price")],
+        [InlineKeyboardButton("🧹 Редактировать данные", callback_data="cleanup_data")],
         [InlineKeyboardButton("🗑️ Сбросить данные", callback_data="reset_data")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
@@ -776,7 +802,7 @@ async def add_service(query, context, data):
     if not service:
         return
     
-    price = get_current_price(service_id)
+    price = get_current_price(service_id, get_price_mode(context))
 
     if get_edit_mode(context, car_id):
         DatabaseManager.remove_service_from_car(car_id, service_id)
@@ -898,24 +924,12 @@ async def close_shift(query, context, data):
         f"🧾 Налог 6%: {format_money(tax)}\n"
         f"✅ К выплате: {format_money(net)}"
     )
+    decade_msg = build_decade_summary(db_user["id"])
+    await query.message.reply_text(decade_msg)
     await query.message.reply_text(
         "Выберите действие:",
         reply_markup=create_main_reply_keyboard(False)
     )
-    context.user_data.pop(f"edit_mode_{car_id}", None)
-    context.user_data.pop(f"group_{car_id}", None)
-    return_shift_id = context.user_data.get("return_shift_id")
-    if return_shift_id:
-        await show_shift_detail(query, context, return_shift_id)
-    else:
-        await query.message.reply_text(
-            "Выберите действие:",
-            reply_markup=create_main_reply_keyboard(True)
-        )
-        user = query.from_user
-        db_user = DatabaseManager.get_user(user.id)
-        if db_user and DatabaseManager.get_active_shift(db_user['id']):
-            await send_goal_status_from_chat(context, query.message.chat_id, db_user['id'])
 
 async def go_back(query, context):
     """Возврат в главное меню"""
@@ -965,20 +979,6 @@ async def leaderboard(query, context):
         "Выберите действие:",
         reply_markup=create_main_reply_keyboard(True)
     )
-    context.user_data.pop(f"edit_mode_{car_id}", None)
-    context.user_data.pop(f"group_{car_id}", None)
-    return_shift_id = context.user_data.get("return_shift_id")
-    if return_shift_id:
-        await show_shift_detail(query, context, return_shift_id)
-    else:
-        await query.message.reply_text(
-            "Выберите действие:",
-            reply_markup=create_main_reply_keyboard(True)
-        )
-        user = query.from_user
-        db_user = DatabaseManager.get_user(user.id)
-        if db_user and DatabaseManager.get_active_shift(db_user['id']):
-            await send_goal_status_from_chat(context, query.message.chat_id, db_user['id'])
 
 async def decade_callback(query, context):
     user = query.from_user
@@ -1026,20 +1026,6 @@ async def export_csv(query, context):
         "Выберите действие:",
         reply_markup=create_main_reply_keyboard(True)
     )
-    context.user_data.pop(f"edit_mode_{car_id}", None)
-    context.user_data.pop(f"group_{car_id}", None)
-    return_shift_id = context.user_data.get("return_shift_id")
-    if return_shift_id:
-        await show_shift_detail(query, context, return_shift_id)
-    else:
-        await query.message.reply_text(
-            "Выберите действие:",
-            reply_markup=create_main_reply_keyboard(True)
-        )
-        user = query.from_user
-        db_user = DatabaseManager.get_user(user.id)
-        if db_user and DatabaseManager.get_active_shift(db_user['id']):
-            await send_goal_status_from_chat(context, query.message.chat_id, db_user['id'])
 
 async def backup_db(query, context):
     user = query.from_user
@@ -1149,20 +1135,6 @@ async def current_shift_message(update: Update, context: CallbackContext):
         f"Машин: {len(cars)}\n"
         f"Сумма: {format_money(total)}\n\n"
     )
-    context.user_data.pop(f"edit_mode_{car_id}", None)
-    context.user_data.pop(f"group_{car_id}", None)
-    return_shift_id = context.user_data.get("return_shift_id")
-    if return_shift_id:
-        await show_shift_detail(query, context, return_shift_id)
-    else:
-        await query.message.reply_text(
-            "Выберите действие:",
-            reply_markup=create_main_reply_keyboard(True)
-        )
-        user = query.from_user
-        db_user = DatabaseManager.get_user(user.id)
-        if db_user and DatabaseManager.get_active_shift(db_user['id']):
-            await send_goal_status_from_chat(context, query.message.chat_id, db_user['id'])
 
     if cars:
         message += "Машины в смене:\n"
@@ -1221,6 +1193,8 @@ async def history_message(update: Update, context: CallbackContext):
 async def settings_message(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton("🎯 Цель дня", callback_data="change_goal")],
+        [InlineKeyboardButton("🌗 Переключить прайс (день/ночь)", callback_data="toggle_price")],
+        [InlineKeyboardButton("🧹 Редактировать данные", callback_data="cleanup_data")],
         [InlineKeyboardButton("🗑️ Сбросить данные", callback_data="reset_data")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
@@ -1301,8 +1275,179 @@ async def show_car_services(query, context: CallbackContext, car_id: int, page: 
     
     await query.edit_message_text(
         message,
-        reply_markup=create_services_keyboard(car_id, page, edit_mode)
+        reply_markup=create_services_keyboard(car_id, page, edit_mode, get_price_mode(context))
     )
+
+
+async def notify_decade_change_if_needed(update: Update, context: CallbackContext, user_id: int):
+    current_idx, current_start, current_end, current_key, _ = get_decade_period(date.today())
+    last_key = DatabaseManager.get_last_decade_notified(user_id)
+
+    if not last_key:
+        DatabaseManager.set_last_decade_notified(user_id, current_key)
+        return
+
+    if last_key == current_key:
+        return
+
+    try:
+        year_s, month_s, decade_s = last_key.split("-")
+        year = int(year_s)
+        month = int(month_s)
+        idx = int(decade_s.replace("D", ""))
+    except Exception:
+        DatabaseManager.set_last_decade_notified(user_id, current_key)
+        return
+
+    if idx == 1:
+        start_day, end_day = 1, 10
+    elif idx == 2:
+        start_day, end_day = 11, 20
+    else:
+        start_day = 21
+        end_day = calendar.monthrange(year, month)[1]
+
+    prev_start = date(year, month, start_day)
+    prev_end = date(year, month, end_day)
+    total = DatabaseManager.get_user_total_between_dates(user_id, prev_start.isoformat(), prev_end.isoformat())
+
+    text = (
+        "🔔 Декада сменилась!\n"
+        f"Закрыта декада: {format_decade_range(prev_start, prev_end)}\n"
+        f"Итог за период: {format_money(total)}\n\n"
+        f"Текущая декада: {current_idx}-я ({format_decade_range(current_start, current_end)})"
+    )
+
+    if update.message:
+        await update.message.reply_text(text)
+    elif update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(text)
+
+    DatabaseManager.set_last_decade_notified(user_id, current_key)
+
+
+async def toggle_price_mode(query, context):
+    user = query.from_user
+    db_user = DatabaseManager.get_user(user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    current = get_price_mode(context, db_user['id'])
+    new_mode = "night" if current == "day" else "day"
+    context.user_data["price_mode"] = new_mode
+    DatabaseManager.set_price_mode(db_user['id'], new_mode)
+    label = "🌙 Ночной" if new_mode == "night" else "☀️ Дневной"
+    await query.edit_message_text(f"✅ Прайс переключен: {label}")
+
+
+async def cleanup_data_menu(query, context):
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    months = DatabaseManager.get_user_months_with_data(db_user['id'])
+    if not months:
+        await query.edit_message_text("Пока нет данных для редактирования.")
+        return
+
+    keyboard = []
+    for ym in months:
+        year, month = ym.split('-')
+        month_i = int(month)
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{MONTH_NAMES[month_i].capitalize()} {year}",
+                callback_data=f"cleanup_month_{ym}",
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="settings")])
+    await query.edit_message_text(
+        "🧹 Выберите месяц для редактирования:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def cleanup_month(query, context, data):
+    ym = data.replace("cleanup_month_", "")
+    year, month = ym.split('-')
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    days = DatabaseManager.get_month_days_with_totals(db_user['id'], int(year), int(month))
+    if not days:
+        await query.edit_message_text("В этом месяце нет данных.")
+        return
+
+    keyboard = []
+    for day_info in days:
+        day_value = day_info['day']
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{day_value} • машин: {day_info['cars_count']} • {format_money(day_info['total_amount'])}",
+                callback_data=f"cleanup_day_{day_value}",
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 К месяцам", callback_data="cleanup_data")])
+    await query.edit_message_text("Выберите день:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def cleanup_day(query, context, data):
+    day = data.replace("cleanup_day_", "")
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    cars = DatabaseManager.get_cars_for_day(db_user['id'], day)
+    if not cars:
+        await query.edit_message_text("За этот день машин нет.")
+        return
+
+    message = f"🗓️ {day}\n\n"
+    keyboard = []
+    for car in cars:
+        message += f"• #{car['id']} {car['car_number']} — {format_money(car['total_amount'])}\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🗑️ Удалить {car['car_number']}",
+                callback_data=f"delcar_{car['id']}_{day}",
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton("⚠️ Удалить весь день", callback_data=f"delday_{day}")])
+    keyboard.append([InlineKeyboardButton("🔙 К дням", callback_data=f"cleanup_month_{day[:7]}")])
+    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def delete_car_callback(query, context, data):
+    body = data.replace("delcar_", "")
+    car_id_s, day = body.split("_", 1)
+    car_id = int(car_id_s)
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    ok = DatabaseManager.delete_car_for_user(db_user['id'], car_id)
+    if ok:
+        await query.answer("Машина удалена")
+    await cleanup_day(query, context, f"cleanup_day_{day}")
+
+
+async def delete_day_callback(query, context, data):
+    day = data.replace("delday_", "")
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    deleted = DatabaseManager.delete_day_data(db_user['id'], day)
+    await query.edit_message_text(f"✅ Удалено машин за день {day}: {deleted}")
+    await cleanup_month(query, context, f"cleanup_month_{day[:7]}")
 
 # ========== ОБРАБОТЧИК ОШИБОК ==========
 
@@ -1316,7 +1461,7 @@ async def error_handler(update: Update, context: CallbackContext):
                 "❌ Произошла ошибка.\n"
                 "Попробуйте ещё раз или перезапустите бота командой /start"
             )
-        except:
+        except Exception:
             pass
 
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
