@@ -5,10 +5,12 @@
 
 import logging
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 import csv
 import os
 import shutil
 import calendar
+import re
 from typing import List
 
 from telegram import (
@@ -36,7 +38,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-APP_VERSION = "2026.02.10-hotfix-3"
+APP_VERSION = "2026.02.11-hotfix-4"
+APP_UPDATED_AT = "2026-02-11 21:55 (Europe/Moscow)"
+APP_TIMEZONE = "Europe/Moscow"
+LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
 
 MONTH_NAMES = {
     1: "января", 2: "февраля", 3: "марта", 4: "апреля",
@@ -58,9 +63,18 @@ def get_current_price(service_id: int, mode: str = "day") -> int:
         return service.get("night_price", 0)
     return service.get("day_price", 0)
 
+
+def now_local() -> datetime:
+    return datetime.now(LOCAL_TZ)
+
 def format_money(amount: int) -> str:
     """Форматирование денежной суммы"""
     return f"{amount:,}₽".replace(",", " ")
+
+
+def plain_service_name(name: str) -> str:
+    """Убираем декоративные emoji/символы в начале названия услуги."""
+    return re.sub(r"^[^0-9A-Za-zА-Яа-я]+\s*", "", name).strip()
 
 
 def get_price_mode(context: CallbackContext, user_id: int | None = None) -> str:
@@ -98,6 +112,7 @@ def get_decade_period(target: date | None = None):
 MENU_OPEN_SHIFT = "📅 Открыть смену"
 MENU_ADD_CAR = "🚗 Добавить машину"
 MENU_CURRENT_SHIFT = "📊 Текущая смена"
+MENU_CLOSE_SHIFT = "🔚 Закрыть смену"
 MENU_HISTORY = "📜 История смен"
 MENU_SETTINGS = "⚙️ Настройки и данные"
 MENU_LEADERBOARD = "🏆 Лидеры смены"
@@ -110,6 +125,7 @@ def create_main_reply_keyboard(has_active_shift: bool = False) -> ReplyKeyboardM
 
     if has_active_shift:
         keyboard.append([KeyboardButton(MENU_ADD_CAR), KeyboardButton(MENU_CURRENT_SHIFT)])
+        keyboard.append([KeyboardButton(MENU_CLOSE_SHIFT)])
     else:
         keyboard.append([KeyboardButton(MENU_OPEN_SHIFT)])
 
@@ -125,9 +141,13 @@ def create_main_reply_keyboard(has_active_shift: bool = False) -> ReplyKeyboardM
     )
 
 def get_service_order() -> List[int]:
-    frequent = [service_id for service_id, service in SERVICES.items() if service.get("frequent")]
-    other = [service_id for service_id, service in SERVICES.items() if not service.get("frequent")]
-    return frequent + other
+    visible = [
+        (service_id, service)
+        for service_id, service in SERVICES.items()
+        if not service.get("hidden")
+    ]
+    visible.sort(key=lambda item: (item[1].get("priority", 999), item[1].get("order", 999), item[0]))
+    return [service_id for service_id, _ in visible]
 
 def chunk_buttons(buttons: List[InlineKeyboardButton], columns: int) -> List[List[InlineKeyboardButton]]:
     return [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
@@ -146,8 +166,14 @@ def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = Fa
     buttons = []
     for service_id in page_ids:
         service = SERVICES[service_id]
-        price = get_current_price(service_id, mode)
-        text = f"{service['name']} ({price}₽)"
+        clean_name = plain_service_name(service['name'])
+        if service.get("kind") == "group":
+            text = f"{clean_name} (выбор)"
+        elif service.get("kind") == "distance":
+            text = f"{clean_name} (по км)"
+        else:
+            price = get_current_price(service_id, mode)
+            text = f"{clean_name} ({price}₽)"
         buttons.append(InlineKeyboardButton(text, callback_data=f"service_{service_id}_{car_id}_{page}"))
 
     keyboard = chunk_buttons(buttons, 3)
@@ -161,6 +187,9 @@ def create_services_keyboard(car_id: int, page: int = 0, is_edit_mode: bool = Fa
 
     if nav_buttons:
         keyboard.append(nav_buttons)
+
+    mode_label = "🌞 День" if mode == "day" else "🌙 Ночь"
+    keyboard.append([InlineKeyboardButton(f"🔁 Изменить прайс: {mode_label}", callback_data=f"toggle_price_car_{car_id}_{page}")])
 
     edit_text = "✅ Готово" if is_edit_mode else "✏️ Редактировать"
     keyboard.append([
@@ -198,7 +227,7 @@ def get_goal_text(user_id: int) -> str:
     if goal <= 0:
         return "🎯 Цель дня не задана."
 
-    today_total = DatabaseManager.get_user_total_for_date(user_id, datetime.now().strftime("%Y-%m-%d"))
+    today_total = DatabaseManager.get_user_total_for_date(user_id, now_local().strftime("%Y-%m-%d"))
     percent = min(int((today_total / goal) * 100) if goal else 0, 100)
     return (
         f"🎯 Цель дня: {format_money(goal)}\n"
@@ -283,7 +312,7 @@ def build_csv_report(user_id: int) -> str:
 
     reports_dir = "reports"
     os.makedirs(reports_dir, exist_ok=True)
-    filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    filename = f"report_{now_local().strftime('%Y%m%d_%H%M%S')}.csv"
     path = os.path.join(reports_dir, filename)
 
     with open(path, "w", newline="", encoding="utf-8") as csvfile:
@@ -305,7 +334,7 @@ def create_db_backup() -> str:
         return ""
     backups_dir = "backups"
     os.makedirs(backups_dir, exist_ok=True)
-    filename = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    filename = f"backup_{now_local().strftime('%Y%m%d_%H%M%S')}.db"
     path = os.path.join(backups_dir, filename)
     shutil.copy2(DB_PATH, path)
     return path
@@ -357,7 +386,9 @@ async def start_command(update: Update, context: CallbackContext):
         await update.message.reply_text(
             f"👋 Привет!\n"
             f"Я бот для учёта услуг на СТО.\n\n"
-            f"Версия: {APP_VERSION}\n\n"
+            f"Версия: {APP_VERSION}\n"
+            f"Обновление: {APP_UPDATED_AT}\n"
+            f"Часовой пояс: {APP_TIMEZONE}\n\n"
             f"Выберите действие:",
             reply_markup=create_main_reply_keyboard(has_active)
         )
@@ -388,6 +419,7 @@ async def handle_message(update: Update, context: CallbackContext):
         MENU_OPEN_SHIFT,
         MENU_ADD_CAR,
         MENU_CURRENT_SHIFT,
+        MENU_CLOSE_SHIFT,
         MENU_HISTORY,
         MENU_SETTINGS,
         MENU_LEADERBOARD,
@@ -440,6 +472,7 @@ async def handle_message(update: Update, context: CallbackContext):
             f"Выберите услуги:",
             reply_markup=create_services_keyboard(car_id, 0, False, get_price_mode(context, db_user["id"]))
         )
+        await send_goal_status(update, context, db_user["id"])
         return
 
     # Ожидание цели дня
@@ -469,6 +502,7 @@ async def handle_message(update: Update, context: CallbackContext):
         MENU_OPEN_SHIFT,
         MENU_ADD_CAR,
         MENU_CURRENT_SHIFT,
+        MENU_CLOSE_SHIFT,
         MENU_HISTORY,
         MENU_SETTINGS,
         MENU_LEADERBOARD,
@@ -481,6 +515,8 @@ async def handle_message(update: Update, context: CallbackContext):
             await add_car_message(update, context)
         elif text == MENU_CURRENT_SHIFT:
             await current_shift_message(update, context)
+        elif text == MENU_CLOSE_SHIFT:
+            await close_shift_message(update, context)
         elif text == MENU_HISTORY:
             await history_message(update, context)
         elif text == MENU_SETTINGS:
@@ -508,7 +544,7 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text("❌ Услуга не найдена.")
             return
         price = km * service.get("rate_per_km", 0)
-        service_name = f"{service['name']} — {km} км"
+        service_name = f"{plain_service_name(service['name'])} — {km} км"
         DatabaseManager.add_service_to_car(car_id, service_id, service_name, price)
         car = DatabaseManager.get_car(car_id)
         if car:
@@ -549,6 +585,12 @@ async def handle_callback(update: Update, context: CallbackContext):
         await settings(query, context)
     elif data.startswith("service_page_"):
         await change_services_page(query, context, data)
+    elif data.startswith("toggle_price_car_"):
+        await toggle_price_mode_for_car(query, context, data)
+    elif data.startswith("childsvc_"):
+        await add_group_child_service(query, context, data)
+    elif data.startswith("back_to_services_"):
+        await back_to_services(query, context, data)
     elif data.startswith("service_"):
         await add_service(query, context, data)
     elif data.startswith("clear_"):
@@ -630,7 +672,7 @@ async def open_shift(query, context):
     
     await query.edit_message_text(
         f"✅ Смена открыта!\n"
-        f"Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}\n\n"
+        f"Время: {now_local().strftime('%H:%M %d.%m.%Y')}\n\n"
         f"Теперь можно добавлять машины."
     )
     await query.message.reply_text(
@@ -776,15 +818,13 @@ async def settings(query, context):
         [InlineKeyboardButton("📈 Статистика", callback_data="stats")],
         [InlineKeyboardButton("📤 Экспорт CSV", callback_data="export_csv")],
         [InlineKeyboardButton("🗄️ Резервная копия", callback_data="backup_db")],
-        [InlineKeyboardButton("🌗 Переключить прайс (день/ночь)", callback_data="toggle_price")],
         [InlineKeyboardButton("🧹 Редактировать данные", callback_data="cleanup_data")],
         [InlineKeyboardButton("🗑️ Сбросить данные", callback_data="reset_data")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
     await query.edit_message_text(
-        "⚙️ НАСТРОЙКИ\n\n"
-        "Выберите параметр:",
+        f"⚙️ НАСТРОЙКИ\n\nВерсия: {APP_VERSION}\nОбновлено: {APP_UPDATED_AT}\n\nВыберите параметр:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -793,25 +833,118 @@ async def add_service(query, context, data):
     parts = data.split('_')
     if len(parts) < 4:
         return
-    
+
     service_id = int(parts[1])
     car_id = int(parts[2])
     page = int(parts[3])
-    
+
     service = SERVICES.get(service_id)
     if not service:
         return
-    
+
+    if service.get("kind") == "group":
+        await show_group_service_options(query, context, service_id, car_id, page)
+        return
+
+    if service.get("kind") == "distance" and not get_edit_mode(context, car_id):
+        context.user_data['awaiting_distance'] = {
+            "car_id": car_id,
+            "service_id": service_id,
+            "page": page,
+        }
+        await query.message.reply_text(
+            f"Введите километраж для услуги «{plain_service_name(service['name'])}».\n"
+            "Пример: 45"
+        )
+        return
+
     price = get_current_price(service_id, get_price_mode(context))
 
     if get_edit_mode(context, car_id):
         DatabaseManager.remove_service_from_car(car_id, service_id)
     else:
-        # Добавляем услугу
-        DatabaseManager.add_service_to_car(car_id, service_id, service['name'], price)
+        clean_name = plain_service_name(service['name'])
+        DatabaseManager.add_service_to_car(car_id, service_id, clean_name, price)
 
-    # Обновляем отображение
     await show_car_services(query, context, car_id, page)
+
+
+async def show_group_service_options(query, context, group_service_id: int, car_id: int, page: int):
+    group_service = SERVICES.get(group_service_id)
+    if not group_service:
+        return
+
+    children = group_service.get("children", [])
+    mode = get_price_mode(context)
+    keyboard = []
+    for child_id in children:
+        child = SERVICES.get(child_id)
+        if not child:
+            continue
+        child_name = plain_service_name(child['name'])
+        child_price = get_current_price(child_id, mode)
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{child_name} ({child_price}₽)",
+                callback_data=f"childsvc_{child_id}_{car_id}_{page}"
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton("⬅️ К услугам", callback_data=f"back_to_services_{car_id}_{page}")])
+    await query.edit_message_text(
+        f"Выберите вариант: {plain_service_name(group_service['name'])}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def add_group_child_service(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 4:
+        return
+    service_id = int(parts[1])
+    car_id = int(parts[2])
+    page = int(parts[3])
+
+    service = SERVICES.get(service_id)
+    if not service:
+        return
+
+    if get_edit_mode(context, car_id):
+        DatabaseManager.remove_service_from_car(car_id, service_id)
+    else:
+        price = get_current_price(service_id, get_price_mode(context))
+        DatabaseManager.add_service_to_car(car_id, service_id, plain_service_name(service['name']), price)
+
+    await show_car_services(query, context, car_id, page)
+
+
+async def back_to_services(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 4:
+        return
+    car_id = int(parts[3])
+    page = int(parts[4])
+    await show_car_services(query, context, car_id, page)
+
+
+async def toggle_price_mode_for_car(query, context, data):
+    parts = data.split('_')
+    if len(parts) < 5:
+        return
+    car_id = int(parts[3])
+    page = int(parts[4])
+
+    user = query.from_user
+    db_user = DatabaseManager.get_user(user.id)
+    if not db_user:
+        return
+
+    current = get_price_mode(context, db_user['id'])
+    new_mode = "night" if current == "day" else "day"
+    context.user_data["price_mode"] = new_mode
+    DatabaseManager.set_price_mode(db_user['id'], new_mode)
+    await show_car_services(query, context, car_id, page)
+
 
 async def clear_services(query, context, data):
     """Очистка услуг"""
@@ -1079,7 +1212,7 @@ async def open_shift_message(update: Update, context: CallbackContext):
     DatabaseManager.start_shift(db_user['id'])
     await update.message.reply_text(
         f"✅ Смена открыта!\n"
-        f"Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}\n\n"
+        f"Время: {now_local().strftime('%H:%M %d.%m.%Y')}\n\n"
         f"Теперь можно добавлять машины.",
         reply_markup=create_main_reply_keyboard(True)
     )
@@ -1152,6 +1285,41 @@ async def current_shift_message(update: Update, context: CallbackContext):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+async def close_shift_message(update: Update, context: CallbackContext):
+    user = update.effective_user
+    db_user = DatabaseManager.get_user(user.id)
+    if not db_user:
+        await update.message.reply_text("❌ Ошибка: пользователь не найден")
+        return
+
+    active_shift = DatabaseManager.get_active_shift(db_user['id'])
+    if not active_shift:
+        await update.message.reply_text(
+            "📭 Нет активной смены для закрытия.",
+            reply_markup=create_main_reply_keyboard(False)
+        )
+        return
+
+    shift_id = active_shift['id']
+    total = DatabaseManager.get_shift_total(shift_id)
+    tax = round(total * 0.06)
+    net = total - tax
+
+    DatabaseManager.close_shift(shift_id)
+
+    await update.message.reply_text(
+        f"🔚 Смена закрыта!\n\n"
+        f"💰 Итого: {format_money(total)}\n"
+        f"🧾 Налог 6%: {format_money(tax)}\n"
+        f"✅ К выплате: {format_money(net)}"
+    )
+    await update.message.reply_text(build_decade_summary(db_user['id']))
+    await update.message.reply_text(
+        "Выберите действие:",
+        reply_markup=create_main_reply_keyboard(False)
+    )
+
+
 async def history_message(update: Update, context: CallbackContext):
     user = update.effective_user
     db_user = DatabaseManager.get_user(user.id)
@@ -1193,13 +1361,12 @@ async def history_message(update: Update, context: CallbackContext):
 async def settings_message(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton("🎯 Цель дня", callback_data="change_goal")],
-        [InlineKeyboardButton("🌗 Переключить прайс (день/ночь)", callback_data="toggle_price")],
         [InlineKeyboardButton("🧹 Редактировать данные", callback_data="cleanup_data")],
         [InlineKeyboardButton("🗑️ Сбросить данные", callback_data="reset_data")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     await update.message.reply_text(
-        "⚙️ НАСТРОЙКИ\n\nВыберите параметр:",
+        f"⚙️ НАСТРОЙКИ\n\nВерсия: {APP_VERSION}\nОбновлено: {APP_UPDATED_AT}\n\nВыберите параметр:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -1257,18 +1424,19 @@ async def show_car_services(query, context: CallbackContext, car_id: int, page: 
     services = DatabaseManager.get_car_services(car_id)
     services_text = ""
     for service in services:
-        services_text += f"• {service['service_name']} ({service['price']}₽) ×{service['quantity']}\n"
+        services_text += f"• {plain_service_name(service['service_name'])} ({service['price']}₽) ×{service['quantity']}\n"
 
     if not services_text:
         services_text = "Нет выбранных услуг\n"
 
     edit_mode = get_edit_mode(context, car_id)
     mode_text = "✏️ Режим: удаление" if edit_mode else "➕ Режим: добавление"
+    price_text = "🌞 Прайс: день" if get_price_mode(context) == "day" else "🌙 Прайс: ночь"
     
     message = (
         f"🚗 Машина: {car['car_number']}\n"
         f"Итог: {format_money(car['total_amount'])}\n\n"
-        f"{mode_text}\n\n"
+        f"{mode_text}\n{price_text}\n\n"
         f"Услуги:\n{services_text}\n"
         f"Выберите ещё:"
     )
@@ -1277,6 +1445,185 @@ async def show_car_services(query, context: CallbackContext, car_id: int, page: 
         message,
         reply_markup=create_services_keyboard(car_id, page, edit_mode, get_price_mode(context))
     )
+
+
+async def notify_decade_change_if_needed(update: Update, context: CallbackContext, user_id: int):
+    current_idx, current_start, current_end, current_key, _ = get_decade_period(date.today())
+    last_key = DatabaseManager.get_last_decade_notified(user_id)
+
+    if not last_key:
+        DatabaseManager.set_last_decade_notified(user_id, current_key)
+        return
+
+    if last_key == current_key:
+        return
+
+    try:
+        year_s, month_s, decade_s = last_key.split("-")
+        year = int(year_s)
+        month = int(month_s)
+        idx = int(decade_s.replace("D", ""))
+    except Exception:
+        DatabaseManager.set_last_decade_notified(user_id, current_key)
+        return
+
+    if idx == 1:
+        start_day, end_day = 1, 10
+    elif idx == 2:
+        start_day, end_day = 11, 20
+    else:
+        start_day = 21
+        end_day = calendar.monthrange(year, month)[1]
+
+    prev_start = date(year, month, start_day)
+    prev_end = date(year, month, end_day)
+    total = DatabaseManager.get_user_total_between_dates(user_id, prev_start.isoformat(), prev_end.isoformat())
+
+    text = (
+        "🔔 Декада сменилась!\n"
+        f"Закрыта декада: {format_decade_range(prev_start, prev_end)}\n"
+        f"Итог за период: {format_money(total)}\n\n"
+        f"Текущая декада: {current_idx}-я ({format_decade_range(current_start, current_end)})"
+    )
+
+    if update.message:
+        await update.message.reply_text(text)
+    elif update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(text)
+
+    DatabaseManager.set_last_decade_notified(user_id, current_key)
+
+
+async def toggle_price_mode(query, context):
+    user = query.from_user
+    db_user = DatabaseManager.get_user(user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    current = get_price_mode(context, db_user['id'])
+    new_mode = "night" if current == "day" else "day"
+    context.user_data["price_mode"] = new_mode
+    DatabaseManager.set_price_mode(db_user['id'], new_mode)
+    label = "🌙 Ночной" if new_mode == "night" else "☀️ Дневной"
+    await query.edit_message_text(
+        f"✅ Прайс переключен: {label}\n"
+        "Откройте машину и добавляйте услуги в этом режиме."
+    )
+
+
+async def cleanup_data_menu(query, context):
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    months = DatabaseManager.get_user_months_with_data(db_user['id'])
+    if not months:
+        await query.edit_message_text("Пока нет данных для редактирования.")
+        return
+
+    keyboard = []
+    for ym in months:
+        year, month = ym.split('-')
+        month_i = int(month)
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{MONTH_NAMES[month_i].capitalize()} {year}",
+                callback_data=f"cleanup_month_{ym}",
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="settings")])
+    await query.edit_message_text(
+        "🧹 Выберите месяц для редактирования:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def cleanup_month(query, context, data):
+    ym = data.replace("cleanup_month_", "")
+    year, month = ym.split('-')
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    days = DatabaseManager.get_month_days_with_totals(db_user['id'], int(year), int(month))
+    if not days:
+        await query.edit_message_text("В этом месяце нет данных.")
+        return
+
+    keyboard = []
+    for day_info in days:
+        day_value = day_info['day']
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{day_value} • машин: {day_info['cars_count']} • {format_money(day_info['total_amount'])}",
+                callback_data=f"cleanup_day_{day_value}",
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 К месяцам", callback_data="cleanup_data")])
+    await query.edit_message_text("Выберите день:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def cleanup_day(query, context, data):
+    day = data.replace("cleanup_day_", "")
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    cars = DatabaseManager.get_cars_for_day(db_user['id'], day)
+    if not cars:
+        await query.edit_message_text("За этот день машин нет.")
+        return
+
+    message = f"🗓️ {day}\n\n"
+    keyboard = []
+    for car in cars:
+        message += f"• #{car['id']} {car['car_number']} — {format_money(car['total_amount'])}\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🗑️ Удалить {car['car_number']}",
+                callback_data=f"delcar_{car['id']}_{day}",
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton("⚠️ Удалить весь день", callback_data=f"delday_{day}")])
+    keyboard.append([InlineKeyboardButton("🔙 К дням", callback_data=f"cleanup_month_{day[:7]}")])
+    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def delete_car_callback(query, context, data):
+    body = data.replace("delcar_", "")
+    car_id_s, day = body.split("_", 1)
+    car_id = int(car_id_s)
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    ok = DatabaseManager.delete_car_for_user(db_user['id'], car_id)
+    DatabaseManager.prune_empty_shifts_for_user(db_user['id'])
+    if ok:
+        await query.answer("Машина удалена")
+    await cleanup_day(query, context, f"cleanup_day_{day}")
+
+
+async def delete_day_callback(query, context, data):
+    day = data.replace("delday_", "")
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    deleted = DatabaseManager.delete_day_data(db_user['id'], day)
+    removed_shifts = DatabaseManager.prune_empty_shifts_for_user(db_user['id'])
+    await query.edit_message_text(
+        f"✅ Удалено машин за день {day}: {deleted}\n"
+        f"Пустых смен удалено: {removed_shifts}"
+    )
+    await cleanup_month(query, context, f"cleanup_month_{day[:7]}")
 
 
 async def notify_decade_change_if_needed(update: Update, context: CallbackContext, user_id: int):
@@ -1488,6 +1835,8 @@ def main():
     print("=" * 60)
     print("🚀 БОТ ДЛЯ УЧЁТА УСЛУГ - УПРОЩЕННАЯ ВЕРСИЯ")
     print(f"🔖 Версия: {APP_VERSION}")
+    print(f"🛠 Обновлено: {APP_UPDATED_AT}")
+    print(f"🕒 Часовой пояс: {APP_TIMEZONE}")
     print("✅ Просто работает")
     print("=" * 60)
     

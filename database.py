@@ -1,8 +1,15 @@
 import sqlite3
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional
 
 DB_PATH = "service_bot.db"
+DB_TIMEZONE = "Europe/Moscow"
+LOCAL_TZ = ZoneInfo(DB_TIMEZONE)
+
+
+def now_local() -> datetime:
+    return datetime.now(LOCAL_TZ)
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -103,7 +110,7 @@ class DatabaseManager:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO shifts (user_id, start_time) VALUES (?, ?)",
-            (user_id, datetime.now())
+            (user_id, now_local())
         )
         shift_id = cur.lastrowid
         conn.commit()
@@ -179,7 +186,7 @@ class DatabaseManager:
         cur = conn.cursor()
         cur.execute(
             "UPDATE shifts SET end_time = ?, status = 'closed' WHERE id = ?",
-            (datetime.now(), shift_id)
+            (now_local(), shift_id)
         )
         conn.commit()
         conn.close()
@@ -598,6 +605,27 @@ class DatabaseManager:
         rows = cur.fetchall()
         conn.close()
         return [row["ym"] for row in rows if row["ym"]]
+
+
+    @staticmethod
+    def prune_empty_shifts_for_user(user_id: int) -> int:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT s.id
+            FROM shifts s
+            LEFT JOIN cars c ON c.shift_id = s.id
+            WHERE s.user_id = ?
+            GROUP BY s.id
+            HAVING COUNT(c.id) = 0""",
+            (user_id,)
+        )
+        shift_ids = [row[0] for row in cur.fetchall()]
+        for shift_id in shift_ids:
+            cur.execute("DELETE FROM shifts WHERE id = ?", (shift_id,))
+        conn.commit()
+        conn.close()
+        return len(shift_ids)
 
 
 if __name__ == "__main__":
