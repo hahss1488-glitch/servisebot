@@ -649,6 +649,7 @@ class DatabaseManager:
         return len(car_ids)
 
     @staticmethod
+<<<<<<< codex/review-and-fix-bot-logic-and-code-88dx42
     def get_decades_with_data(user_id: int, limit: int = 18) -> List[Dict]:
         conn = get_connection()
         cur = conn.cursor()
@@ -705,6 +706,8 @@ class DatabaseManager:
         return [dict(row) for row in rows]
 
     @staticmethod
+=======
+>>>>>>> main
     def get_user_months_with_data(user_id: int, limit: int = 12) -> List[str]:
         conn = get_connection()
         cur = conn.cursor()
