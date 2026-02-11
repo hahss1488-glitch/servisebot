@@ -67,6 +67,7 @@ def init_database():
         daily_goal INTEGER DEFAULT 0,
         price_mode TEXT DEFAULT 'day',
         last_decade_notified TEXT DEFAULT '',
+        is_blocked INTEGER DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
 
@@ -87,6 +88,8 @@ def init_database():
         cur.execute("ALTER TABLE user_settings ADD COLUMN price_mode TEXT DEFAULT 'day'")
     if "last_decade_notified" not in columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN last_decade_notified TEXT DEFAULT ''")
+    if "is_blocked" not in columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN is_blocked INTEGER DEFAULT 0")
     
     conn.commit()
     conn.close()
@@ -113,6 +116,48 @@ class DatabaseManager:
         )
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def is_user_blocked(user_id: int) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT is_blocked FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        return bool(row and int(row["is_blocked"] or 0) == 1)
+
+    @staticmethod
+    def set_user_blocked(user_id: int, blocked: bool) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO user_settings (user_id, is_blocked)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET is_blocked = excluded.is_blocked""",
+            (user_id, 1 if blocked else 0)
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_all_users_with_stats() -> List[Dict]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT u.id, u.telegram_id, u.name, u.created_at,
+            COALESCE(us.is_blocked, 0) as is_blocked,
+            COALESCE(COUNT(DISTINCT s.id), 0) as shifts_count,
+            COALESCE(SUM(c.total_amount), 0) as total_amount
+            FROM users u
+            LEFT JOIN user_settings us ON us.user_id = u.id
+            LEFT JOIN shifts s ON s.user_id = u.id
+            LEFT JOIN cars c ON c.shift_id = s.id
+            GROUP BY u.id
+            ORDER BY u.created_at DESC"""
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
 
     # ========== СМЕНЫ ==========
     @staticmethod
@@ -300,6 +345,8 @@ class DatabaseManager:
             FROM users u
             JOIN shifts s ON s.user_id = u.id AND s.status = 'active'
             LEFT JOIN cars c ON c.shift_id = s.id
+            LEFT JOIN user_settings us ON us.user_id = u.id
+            WHERE COALESCE(us.is_blocked, 0) = 0
             GROUP BY u.id
             ORDER BY total_amount DESC
             LIMIT ?""",
@@ -602,6 +649,65 @@ class DatabaseManager:
         return len(car_ids)
 
     @staticmethod
+<<<<<<< codex/review-and-fix-bot-logic-and-code-88dx42
+    def get_decades_with_data(user_id: int, limit: int = 18) -> List[Dict]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT
+            CAST(strftime('%Y', s.start_time) AS INTEGER) as year,
+            CAST(strftime('%m', s.start_time) AS INTEGER) as month,
+            CASE
+                WHEN CAST(strftime('%d', s.start_time) AS INTEGER) <= 10 THEN 1
+                WHEN CAST(strftime('%d', s.start_time) AS INTEGER) <= 20 THEN 2
+                ELSE 3
+            END as decade_index,
+            COUNT(c.id) as cars_count,
+            COALESCE(SUM(c.total_amount), 0) as total_amount
+            FROM shifts s
+            JOIN cars c ON c.shift_id = s.id
+            WHERE s.user_id = ?
+            GROUP BY year, month, decade_index
+            ORDER BY year DESC, month DESC, decade_index DESC
+            LIMIT ?""",
+            (user_id, limit)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def get_days_for_decade(user_id: int, year: int, month: int, decade_index: int) -> List[Dict]:
+        conn = get_connection()
+        cur = conn.cursor()
+        if decade_index == 1:
+            start_day, end_day = 1, 10
+        elif decade_index == 2:
+            start_day, end_day = 11, 20
+        else:
+            start_day, end_day = 21, 31
+
+        cur.execute(
+            """SELECT date(s.start_time) as day,
+            COUNT(c.id) as cars_count,
+            COALESCE(SUM(c.total_amount), 0) as total_amount
+            FROM shifts s
+            JOIN cars c ON c.shift_id = s.id
+            WHERE s.user_id = ?
+              AND CAST(strftime('%Y', s.start_time) AS INTEGER) = ?
+              AND CAST(strftime('%m', s.start_time) AS INTEGER) = ?
+              AND CAST(strftime('%d', s.start_time) AS INTEGER) BETWEEN ? AND ?
+            GROUP BY day
+            ORDER BY day DESC""",
+            (user_id, year, month, start_day, end_day)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+=======
+>>>>>>> main
     def get_user_months_with_data(user_id: int, limit: int = 12) -> List[str]:
         conn = get_connection()
         cur = conn.cursor()
