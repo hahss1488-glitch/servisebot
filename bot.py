@@ -1,6 +1,5 @@
 """
-🤖 БОТ ДЛЯ УЧЁТА УСЛУГ - УПРОЩЕННАЯ ВЕРСИЯ
-Просто работает
+🤖 БОТ ДЛЯ УЧЁТА УСЛУГ 
 """
 
 import logging
@@ -242,7 +241,7 @@ def parse_datetime(value):
 def get_goal_text(user_id: int) -> str:
     goal = DatabaseManager.get_daily_goal(user_id)
     if goal <= 0:
-        return "🎯 Цель дня не задана."
+        return "🎯 Укажи денежную цель смены."
 
     today_total = DatabaseManager.get_user_total_for_date(user_id, now_local().strftime("%Y-%m-%d"))
     percent = min(int((today_total / goal) * 100) if goal else 0, 100)
@@ -424,11 +423,8 @@ async def start_command(update: Update, context: CallbackContext):
 
         await update.message.reply_text(
             f"👋 Привет!\n"
-            f"Я бот для учёта услуг на СТО.\n\n"
-            f"Версия: {APP_VERSION}\n"
-            f"Обновление: {APP_UPDATED_AT}\n"
-            f"Часовой пояс: {APP_TIMEZONE}\n\n"
-            f"Выберите действие:",
+            f"Я главный помощник механика.\n\n"
+            f"Версия: {APP_VERSION}\n",
             reply_markup=create_main_reply_keyboard(has_active)
         )
         await send_goal_status(update, context, db_user['id'])
@@ -866,11 +862,11 @@ async def add_car(query, context):
     
     await query.edit_message_text(
         "Введите номер машины:\n\n"
-        "Примеры правильных номеров:\n"
-        "• А123ВС777\n"
-        "• Х340РУ797\n"
-        "• В567ТХ799\n\n"
-        "Можно вводить русскими или английскими буквами.",
+        "В любом формате:\n"
+        "• а123вс\n"
+        "• х340ру797\n"
+        "• Е401ЕК797\n"
+        "Можно вводить русскими или английскими буквами. Если регион не указан, по умолчанию ставится 797.",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_add_car")]]
         )
@@ -1501,7 +1497,7 @@ async def change_goal(query, context):
     """Запрос цели дня"""
     context.user_data['awaiting_goal'] = True
     await query.edit_message_text(
-        "Введите цель дня суммой, например: 5000"
+        "Введи цель дня суммой, например: 5000"
     )
 
 async def leaderboard(query, context):
