@@ -43,8 +43,6 @@ APP_UPDATED_AT = "2026-02-11 22:40 (Europe/Moscow)"
 APP_TIMEZONE = "Europe/Moscow"
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
 ADMIN_TELEGRAM_IDS = {8379101989}
-ADMIN_TELEGRAM_IDS = {8379101989}
->>>>>>> main
 
 MONTH_NAMES = {
     1: "января", 2: "февраля", 3: "марта", 4: "апреля",
@@ -97,8 +95,6 @@ def format_decade_range(start: date, end: date) -> str:
 
 def get_decade_period(target: date | None = None):
     current = target or now_local().date()
-    current = target or now_local().date()
->>>>>>> main
     if current.day <= 10:
         start_day, end_day, idx = 1, 10, 1
     elif current.day <= 20:
@@ -143,7 +139,6 @@ def format_decade_title(year: int, month: int, decade_index: int) -> str:
         end_day = calendar.monthrange(year, month)[1]
     return f"{start_day:02d}-{end_day:02d} {MONTH_NAMES[month]} {year}"
 
->>>>>>> main
 # ========== КЛАВИАТУРЫ ==========
 
 MENU_OPEN_SHIFT = "📅 Открыть смену"
@@ -224,7 +219,6 @@ def create_services_keyboard(
         elif service.get("kind") == "distance":
             text = "Дальняк"
             text = "Дальняк"
->>>>>>> main
         else:
             text = clean_name
         buttons.append(InlineKeyboardButton(text, callback_data=f"service_{service_id}_{car_id}_{page}"))
@@ -251,7 +245,6 @@ def create_services_keyboard(
     keyboard.append([
         InlineKeyboardButton(edit_text, callback_data=f"toggle_edit_{car_id}_{page}"),
         InlineKeyboardButton("🗑️ Очистить", callback_data=f"clear_{car_id}_{page}"),
->>>>>>> main
         InlineKeyboardButton("💾 Сохранить", callback_data=f"save_{car_id}"),
     ])
 
@@ -932,7 +925,6 @@ async def handle_callback(update: Update, context: CallbackContext):
         await history_decade_days(query, context, data)
     elif data.startswith("history_day_"):
         await history_day_cars(query, context, data)
->>>>>>> main
     elif data.startswith("cleanup_month_"):
         await cleanup_month(query, context, data)
     elif data.startswith("cleanup_day_"):
@@ -1035,7 +1027,6 @@ async def add_car(query, context):
         "• Х340РУ797\n"
         "• В567ТХ799\n\n"
         "Можно вводить русскими или английскими буквами.",
->>>>>>> main
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("❌ Отмена", callback_data="cancel_add_car")]]
         )
@@ -1087,8 +1078,6 @@ async def settings(query, context):
         [InlineKeyboardButton("🗄️ Резервная копия", callback_data="backup_db")],
         [InlineKeyboardButton("🧩 Мои комбинации", callback_data="combo_settings")],
         [InlineKeyboardButton("➕ Создать комбо", callback_data="combo_create_settings")],
-        [InlineKeyboardButton("➕ Создать комбо", callback_data="combo_create_settings")],
->>>>>>> main
         [InlineKeyboardButton("🧹 Редактировать данные", callback_data="cleanup_data")],
         [InlineKeyboardButton("🗑️ Сбросить данные", callback_data="reset_data")],
     ]
@@ -1203,27 +1192,6 @@ async def admin_user_card(query, context, data):
         f"👤 {row['name']}\nTelegram ID: {row['telegram_id']}\n"
         f"Смен: {row['shifts_count']}\nСумма: {format_money(int(row['total_amount'] or 0))}\n"
         f"Статус: {'Заблокирован' if blocked else 'Активен'}",
-        return
-
-    children = group_service.get("children", [])
-    mode = get_price_mode(context)
-    keyboard = []
-    for child_id in children:
-        child = SERVICES.get(child_id)
-        if not child:
-            continue
-        child_name = plain_service_name(child['name'])
-        child_price = get_current_price(child_id, mode)
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{child_name} ({child_price}₽)",
-                callback_data=f"childsvc_{child_id}_{car_id}_{page}"
-            )
-        ])
-
-    keyboard.append([InlineKeyboardButton("⬅️ К услугам", callback_data=f"back_to_services_{car_id}_{page}")])
-    await query.edit_message_text(
-        f"Выберите вариант: {plain_service_name(group_service['name'])}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -1757,7 +1725,6 @@ async def clear_services_prompt(query, context, data):
     parts = data.split('_')
     if len(parts) < 3:
         return
->>>>>>> main
     car_id = int(parts[1])
     page = int(parts[2])
     keyboard = [
@@ -2183,40 +2150,14 @@ async def close_shift_message(update: Update, context: CallbackContext):
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Да, закрыть", callback_data=f"close_confirm_yes_{shift_id}")],
-        [InlineKeyboardButton("❌ Нет", callback_data=f"close_confirm_no_{shift_id}")],
+        [InlineKeyboardButton("❌ Нет, оставить открытой", callback_data=f"close_confirm_no_{shift_id}")],
     ])
 
     await update.message.reply_text(
-        dashboard + "\n\n⚠️ Подтвердите закрытие смены:",
+        dashboard + "\n\n⚠️ Вы точно хотите закрыть смену?",
         parse_mode="HTML",
         reply_markup=keyboard,
-    start_time = parse_datetime(active_shift.get("start_time"))
-    end_time = now_local()
-    hours = max((end_time - start_time).total_seconds() / 3600, 0.01) if start_time else 0.01
-    cars_count = len(DatabaseManager.get_shift_cars(shift_id))
-    cars_per_hour = cars_count / hours
-    money_per_hour = total / hours
-    await update.message.reply_text(
-        f"🔚 Смена закрыта!\n\n"
-        f"💰 Итого: {format_money(total)}\n"
-        f"🧾 Налог 6%: {format_money(tax)}\n"
-        f"✅ К выплате: {format_money(net)}\n"
-        f"⏱ Длительность: {hours:.1f} ч\n"
-        f"🚗 Машин/час: {cars_per_hour:.2f}\n"
-        f"💸 Доход/час: {format_money(int(money_per_hour))}"
     )
-    await update.message.reply_text(
-        "Выберите действие:",
-        reply_markup=create_main_reply_keyboard(False)
-    )
-    await update.message.reply_text(build_decade_summary(db_user['id']))
-    await update.message.reply_text(
-        "Выберите действие:",
-        reply_markup=create_main_reply_keyboard(False)
->>>>>>> main
-    )
-
-
 
 async def history_message(update: Update, context: CallbackContext):
     user = update.effective_user
@@ -2247,7 +2188,6 @@ async def settings_message(update: Update, context: CallbackContext):
         [InlineKeyboardButton("📜 История по декадам", callback_data="history_decades")],
         [InlineKeyboardButton("🧩 Мои комбинации", callback_data="combo_settings")],
         [InlineKeyboardButton("➕ Создать комбо", callback_data="combo_create_settings")],
->>>>>>> main
         [InlineKeyboardButton("🧹 Редактировать данные", callback_data="cleanup_data")],
         [InlineKeyboardButton("🗑️ Сбросить данные", callback_data="reset_data")],
     ]
@@ -2348,7 +2288,6 @@ async def show_car_services(query, context: CallbackContext, car_id: int, page: 
 async def notify_decade_change_if_needed(update: Update, context: CallbackContext, user_id: int):
     current_idx, current_start, current_end, current_key, _ = get_decade_period(now_local().date())
     current_idx, current_start, current_end, current_key, _ = get_decade_period(now_local().date())
->>>>>>> main
     last_key = DatabaseManager.get_last_decade_notified(user_id)
 
     if not last_key:
@@ -2540,7 +2479,6 @@ async def delete_day_callback(query, context, data):
     await query.edit_message_text(
         f"✅ Удалено машин за день {day}: {deleted}\n"
         f"Пустых смен удалено: {removed_shifts}"
->>>>>>> main
     )
     await cleanup_month(query, context, f"cleanup_month_{day[:7]}")
 

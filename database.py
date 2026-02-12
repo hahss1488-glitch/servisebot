@@ -725,7 +725,6 @@ class DatabaseManager:
         return [dict(row) for row in rows]
 
     @staticmethod
->>>>>>> main
     def get_user_months_with_data(user_id: int, limit: int = 12) -> List[str]:
         conn = get_connection()
         cur = conn.cursor()
