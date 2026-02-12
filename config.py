@@ -1,4 +1,5 @@
-BOT_TOKEN = "8584457591:AAGZAozXcLF6A9UpfuSs69jAvAvUSGYbM-U"
+import os
+BOT_TOKEN = os.getenv("SERVICEBOT_TOKEN")
 
 # ========== НАСТРОЙКИ НОМЕРОВ ==========
 
