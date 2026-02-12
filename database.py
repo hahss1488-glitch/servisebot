@@ -377,6 +377,38 @@ class DatabaseManager:
         return [dict(row) for row in rows]
 
     @staticmethod
+    def get_decade_leaderboard(year: int, month: int, decade_index: int, limit: int = 10) -> List[Dict]:
+        if decade_index == 1:
+            start_day, end_day = 1, 10
+        elif decade_index == 2:
+            start_day, end_day = 11, 20
+        else:
+            start_day, end_day = 21, 31
+
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT u.name,
+            COUNT(DISTINCT s.id) as shift_count,
+            COALESCE(SUM(c.total_amount), 0) as total_amount
+            FROM users u
+            JOIN shifts s ON s.user_id = u.id
+            JOIN cars c ON c.shift_id = s.id
+            LEFT JOIN user_settings us ON us.user_id = u.id
+            WHERE COALESCE(us.is_blocked, 0) = 0
+              AND CAST(strftime('%Y', s.start_time) AS INTEGER) = ?
+              AND CAST(strftime('%m', s.start_time) AS INTEGER) = ?
+              AND CAST(strftime('%d', s.start_time) AS INTEGER) BETWEEN ? AND ?
+            GROUP BY u.id
+            ORDER BY total_amount DESC
+            LIMIT ?""",
+            (year, month, start_day, end_day, limit)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    @staticmethod
     def get_user_total_between_dates(user_id: int, start_date: str, end_date: str) -> int:
         conn = get_connection()
         cur = conn.cursor()
@@ -760,6 +792,37 @@ class DatabaseManager:
         conn.commit()
         conn.close()
         return len(shift_ids)
+
+    @staticmethod
+    def reset_user_data(user_id: int) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM shifts WHERE user_id = ?", (user_id,))
+        shift_ids = [row[0] for row in cur.fetchall()]
+
+        if shift_ids:
+            placeholders = ",".join("?" for _ in shift_ids)
+            cur.execute(f"SELECT id FROM cars WHERE shift_id IN ({placeholders})", shift_ids)
+            car_ids = [row[0] for row in cur.fetchall()]
+            if car_ids:
+                car_ph = ",".join("?" for _ in car_ids)
+                cur.execute(f"DELETE FROM car_services WHERE car_id IN ({car_ph})", car_ids)
+            cur.execute(f"DELETE FROM cars WHERE shift_id IN ({placeholders})", shift_ids)
+
+        cur.execute("DELETE FROM shifts WHERE user_id = ?", (user_id,))
+        cur.execute("DELETE FROM user_combos WHERE user_id = ?", (user_id,))
+        cur.execute(
+            """INSERT INTO user_settings (user_id, daily_goal, price_mode, last_decade_notified)
+            VALUES (?, 0, 'day', '')
+            ON CONFLICT(user_id) DO UPDATE SET
+                daily_goal = 0,
+                price_mode = 'day',
+                last_decade_notified = ''""",
+            (user_id,)
+        )
+
+        conn.commit()
+        conn.close()
 
 
     @staticmethod
