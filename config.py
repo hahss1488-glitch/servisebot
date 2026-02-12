@@ -43,7 +43,7 @@ SERVICES = {
     7: {"name": "🔋 Зарядка АКБ", "day_price": 125, "night_price": 98, "priority": 2, "order": 1},
     8: {"name": "🏁 Завершение длит. аренд", "day_price": 93, "night_price": 74, "priority": 2, "order": 2},
     9: {"name": "🧪 Долив тех. жидкостей", "day_price": 77, "night_price": 66, "priority": 2, "order": 3},
-    10: {"name": "🛣️ Дальняк", "day_price": 0, "night_price": 0, "priority": 2, "order": 4, "kind": "distance", "rate_per_km": 7},
+   10: {"name": "🛣️ Дальняк", "day_price": 0, "night_price": 0, "priority": 2, "order": 4, "kind": "distance", "rate_per_km": 7},
     11: {"name": "🚙 Длительные поездки (список)", "priority": 2, "order": 5, "kind": "group", "children": [30, 31, 32, 33]},
     12: {"name": "🧾 Диагностика Чек", "day_price": 50, "night_price": 39, "priority": 3, "order": 1},
     13: {"name": "🛞 Подкачка колеса", "day_price": 75, "night_price": 59, "priority": 3, "order": 2},
