@@ -210,6 +210,26 @@ class DatabaseManager:
         return row[0] if row else 0
 
     @staticmethod
+    def get_shift_top_services(shift_id: int, limit: int = 3) -> List[Dict]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT cs.service_name,
+            SUM(cs.quantity) as total_count,
+            SUM(cs.price * cs.quantity) as total_amount
+            FROM cars c
+            JOIN car_services cs ON cs.car_id = c.id
+            WHERE c.shift_id = ?
+            GROUP BY cs.service_name
+            ORDER BY total_amount DESC
+            LIMIT ?""",
+            (shift_id, limit)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    @staticmethod
     def get_user_shifts(user_id: int, limit: int = 10) -> List[Dict]:
         conn = get_connection()
         cur = conn.cursor()
@@ -649,7 +669,6 @@ class DatabaseManager:
         return len(car_ids)
 
     @staticmethod
-<<<<<<< codex/review-and-fix-bot-logic-and-code-88dx42
     def get_decades_with_data(user_id: int, limit: int = 18) -> List[Dict]:
         conn = get_connection()
         cur = conn.cursor()
@@ -706,7 +725,6 @@ class DatabaseManager:
         return [dict(row) for row in rows]
 
     @staticmethod
-=======
 >>>>>>> main
     def get_user_months_with_data(user_id: int, limit: int = 12) -> List[str]:
         conn = get_connection()
