@@ -44,8 +44,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-APP_VERSION = "2026.02.16-hotfix-21"
-APP_UPDATED_AT = "16.02.2026 09:10 (МСК)"
+APP_VERSION = "2026.02.16-hotfix-22"
+APP_UPDATED_AT = "16.02.2026 10:05 (МСК)"
 APP_TIMEZONE = "Europe/Moscow"
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
 ADMIN_TELEGRAM_IDS = {8379101989}
