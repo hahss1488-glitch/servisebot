@@ -3917,48 +3917,84 @@ def _load_rank_font(image_font, size: int):
         return None
 
 
-def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], active_leaders: list[dict]) -> BytesIO | None:
+def _safe_text_for_font(value: str) -> str:
+    text = str(value)
+    try:
+        text.encode("latin-1")
+        return text
+    except UnicodeEncodeError:
+        return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def _draw_rank_text(draw, xy, value: str, fill, font):
+    text = str(value)
+    try:
+        draw.text(xy, text, fill=fill, font=font)
+    except UnicodeEncodeError:
+        draw.text(xy, _safe_text_for_font(text), fill=fill, font=font)
+
+
+def build_leaderboard_image_bytes(
+    decade_title: str,
+    decade_leaders: list[dict],
+    active_leaders: list[dict],
+    report_dt: datetime | None = None,
+) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
         logger.warning("Leaderboard image fallback reason: Pillow not available in current Python environment")
         return None
     try:
         from PIL import Image, ImageDraw, ImageFont
 
-        width = 920
+        report_time = report_dt or now_local()
+        report_time_text = report_time.strftime("%d.%m.%Y %H:%M")
+
+        width = 960
         row_h = 44
-        header_h = 90
+        header_h = 124
         section_h = 52
         rows = max(len(decade_leaders), 1) + max(len(active_leaders), 1)
-        height = header_h + section_h * 2 + rows * row_h + 90
+        height = header_h + section_h * 2 + rows * row_h + 96
 
         img = Image.new("RGB", (width, height), "#0f172a")
         draw = ImageDraw.Draw(img)
 
         title_font = _load_rank_font(ImageFont, 34)
+        meta_font = _load_rank_font(ImageFont, 19)
         sec_font = _load_rank_font(ImageFont, 24)
+        table_head_font = _load_rank_font(ImageFont, 20)
         row_font = _load_rank_font(ImageFont, 22)
 
         draw.rounded_rectangle((20, 20, width - 20, height - 20), radius=22, fill="#111827", outline="#334155", width=2)
-        draw.text((42, 38), f"TOP Героев — {decade_title}", fill="#f8fafc", font=title_font)
+        _draw_rank_text(draw, (42, 34), f"TOP Героев — {decade_title}", fill="#f8fafc", font=title_font)
+        _draw_rank_text(draw, (42, 78), "Сравнение лидеров декады и активной смены", fill="#cbd5e1", font=meta_font)
+        _draw_rank_text(draw, (width - 318, 78), f"Отчёт: {report_time_text}", fill="#93c5fd", font=meta_font)
 
-        y = 100
+        y = header_h
 
         def draw_section(title: str, leaders: list[dict], y_pos: int) -> int:
             draw.rectangle((36, y_pos, width - 36, y_pos + 36), fill="#1e293b")
-            draw.text((48, y_pos + 7), title, fill="#e2e8f0", font=sec_font)
+            _draw_rank_text(draw, (48, y_pos + 7), title, fill="#e2e8f0", font=sec_font)
             y_pos += 44
 
+            draw.rectangle((36, y_pos, width - 36, y_pos + 32), fill="#162133")
+            _draw_rank_text(draw, (54, y_pos + 5), "#", fill="#93c5fd", font=table_head_font)
+            _draw_rank_text(draw, (112, y_pos + 5), "Герой", fill="#93c5fd", font=table_head_font)
+            _draw_rank_text(draw, (500, y_pos + 5), "Выручка", fill="#93c5fd", font=table_head_font)
+            _draw_rank_text(draw, (760, y_pos + 5), "Смены", fill="#93c5fd", font=table_head_font)
+            y_pos += 34
+
             if not leaders:
-                draw.text((60, y_pos + 8), "Пока нет данных", fill="#94a3b8", font=row_font)
+                _draw_rank_text(draw, (60, y_pos + 8), "Пока нет данных", fill="#94a3b8", font=row_font)
                 return y_pos + row_h
 
             for place, leader in enumerate(leaders, start=1):
                 bg = "#0b1220" if place % 2 else "#0a1020"
                 draw.rectangle((36, y_pos, width - 36, y_pos + row_h - 4), fill=bg)
-                draw.text((54, y_pos + 9), f"{place}", fill="#93c5fd", font=row_font)
-                draw.text((110, y_pos + 9), str(leader.get("name", "—"))[:24], fill="#f8fafc", font=row_font)
-                draw.text((480, y_pos + 9), format_money(int(leader.get("total_amount", 0))), fill="#86efac", font=row_font)
-                draw.text((720, y_pos + 9), f"смен: {int(leader.get('shift_count', 0))}", fill="#cbd5e1", font=row_font)
+                _draw_rank_text(draw, (54, y_pos + 9), f"{place}", fill="#93c5fd", font=row_font)
+                _draw_rank_text(draw, (110, y_pos + 9), str(leader.get("name", "—"))[:24], fill="#f8fafc", font=row_font)
+                _draw_rank_text(draw, (500, y_pos + 9), format_money(int(leader.get("total_amount", 0))), fill="#86efac", font=row_font)
+                _draw_rank_text(draw, (760, y_pos + 9), str(int(leader.get('shift_count', 0))), fill="#cbd5e1", font=row_font)
                 y_pos += row_h
             return y_pos
 
@@ -3978,21 +4014,32 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
 
 async def send_leaderboard_output(chat_target, context: CallbackContext, decade_title: str, decade_leaders: list[dict], active_leaders: list[dict], reply_markup=None):
     text_message = build_leaderboard_text(decade_title, decade_leaders, active_leaders)
-    image = build_leaderboard_image_bytes(decade_title, decade_leaders, active_leaders)
+    image = build_leaderboard_image_bytes(decade_title, decade_leaders, active_leaders, report_dt=now_local())
     if image is not None:
         logger.info("Leaderboard output mode: PNG image")
         try:
             await context.bot.send_photo(
                 chat_id=chat_target.chat_id,
                 photo=image,
-                caption=text_message[:1024],
+                caption="🏆 Отчёт готов",
                 reply_markup=reply_markup,
             )
             return
         except Exception:
             logger.error("Leaderboard output fallback reason: send_photo failed\n%s", traceback.format_exc())
-
-    logger.warning("Leaderboard output mode: text fallback")
+            try:
+                image.seek(0)
+                await context.bot.send_document(
+                    chat_id=chat_target.chat_id,
+                    document=image,
+                    filename="leaderboard.png",
+                    caption="🏆 Отчёт готов (как файл)",
+                    reply_markup=reply_markup,
+                )
+                logger.info("Leaderboard output mode: PNG document")
+                return
+            except Exception:
+                logger.error("Leaderboard output fallback reason: send_document failed\n%s", traceback.format_exc())
 
     logger.warning("Leaderboard output mode: text fallback")
 
