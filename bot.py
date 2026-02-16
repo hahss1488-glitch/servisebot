@@ -44,8 +44,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-APP_VERSION = "2026.02.16-hotfix-21"
-APP_UPDATED_AT = "16.02.2026 09:10 (МСК)"
+APP_VERSION = "2026.02.16-hotfix-23"
+APP_UPDATED_AT = "16.02.2026 10:35 (МСК)"
 APP_TIMEZONE = "Europe/Moscow"
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
 ADMIN_TELEGRAM_IDS = {8379101989}
@@ -2037,6 +2037,9 @@ async def admin_toggle_block(query, context, data):
         return
     new_state = not bool(int(row.get("is_blocked", 0)))
     DatabaseManager.set_user_blocked(user_id, new_state)
+    if new_state:
+        expired_at = now_local() - timedelta(minutes=1)
+        DatabaseManager.set_subscription_expires_at(user_id, expired_at.isoformat())
     await admin_user_card(query, context, f"admin_user_{user_id}")
 
 
@@ -2599,22 +2602,86 @@ async def account_info_callback(query, context):
 
 
 async def subscription_info_callback(query, context):
-    await query.edit_message_text(
-        "Стоимость подписки 200₽/мес.\nЗа покупкой стучаться к @dakonoplev2",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад в профиль", callback_data="account_info")]]),
-    )
+    text = "Стоимость подписки 200₽/мес.\nЗа покупкой стучаться к @dakonoplev2"
+    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Назад в профиль", callback_data="account_info")]])
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+        return
+    except Exception:
+        pass
+    try:
+        await query.edit_message_caption(caption=text[:1024], reply_markup=reply_markup)
+        return
+    except Exception:
+        await query.message.reply_text(text, reply_markup=reply_markup)
 
+
+def get_default_faq_topics() -> list[dict]:
+    return [
+        {
+            "id": "quick_start",
+            "title": "⚡ Короткий гайд: с чего начать",
+            "text": (
+                "1) Откройте смену в разделе «Смена».\n"
+                "2) Отправьте номер авто прямо в чат.\n"
+                "3) Выберите услуги и сохраните машину.\n"
+                "4) Следите за дашбордом, целью и статистикой.\n\n"
+                "Важно: номер авто можно отправлять в любой момент — не обязательно нажимать отдельные кнопки."
+            ),
+        },
+        {
+            "id": "cars",
+            "title": "🚗 Как добавить машину",
+            "text": (
+                "Просто отправьте номер авто сообщением в чат.\n"
+                "Можно в свободном формате: х340ру, ХРУ340, x340py и т.д.\n"
+                "Бот нормализует и сохранит номер в едином виде (например: Х340РУ797).\n\n"
+                "После этого выберите услуги, при необходимости откройте режим редактирования и нажмите «Сохранить машину»."
+            ),
+        },
+        {
+            "id": "calendar",
+            "title": "🗓️ Календарь: зачем и как использовать",
+            "text": (
+                "Календарь нужен для планирования графика 2/2 и расчётов по целям декады.\n"
+                "- Основные смены: ваш базовый план.\n"
+                "- Доп. смены: дни сверх плана.\n"
+                "- Выходные: дни без смен.\n\n"
+                "Редактируйте календарь, если фактический график отличается от базового — это влияет на расчёт цели дня."
+            ),
+        },
+        {
+            "id": "decade_goal",
+            "title": "🎯 Цель декады",
+            "text": (
+                "В настройках включите «Цель декады» и задайте сумму.\n"
+                "Бот посчитает цель дня на основе рабочих дней в текущей декаде и будет показывать прогресс.\n"
+                "Когда смена открыта и цель включена, статус цели закрепляется в чате."
+            ),
+        },
+        {
+            "id": "core_features",
+            "title": "📊 Основные функции бота",
+            "text": (
+                "- «Текущая смена»: быстрый контроль выручки, машин и топ-услуг.\n"
+                "- «История/декады»: анализ результата по периодам и дням.\n"
+                "- «Топ героев»: сравнение лидеров декады и активной смены.\n"
+                "- «Прайс/комбо»: ускорение добавления услуг.\n"
+                "- «Подписка/профиль»: контроль доступа и статуса аккаунта."
+            ),
+        },
+    ]
 
 def get_faq_topics() -> list[dict]:
     raw = DatabaseManager.get_app_content("faq_topics_json", "")
     if not raw:
-        return []
+        return get_default_faq_topics()
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return []
+        return get_default_faq_topics()
     if not isinstance(data, list):
-        return []
+        return get_default_faq_topics()
     result = []
     for item in data:
         if not isinstance(item, dict):
@@ -2624,7 +2691,7 @@ def get_faq_topics() -> list[dict]:
         item_id = str(item.get("id", "")).strip()
         if title and body and item_id:
             result.append({"id": item_id, "title": title, "text": body})
-    return result
+    return result or get_default_faq_topics()
 
 
 def save_faq_topics(topics: list[dict]) -> None:
@@ -3834,6 +3901,8 @@ def _load_rank_font(image_font, size: int):
     for path in (
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     ):
         try:
             logger.debug("Leaderboard font loaded: %s", path)
@@ -3870,7 +3939,7 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
         row_font = _load_rank_font(ImageFont, 22)
 
         draw.rounded_rectangle((20, 20, width - 20, height - 20), radius=22, fill="#111827", outline="#334155", width=2)
-        draw.text((42, 38), f"🏆 Топ героев — {decade_title}", fill="#f8fafc", font=title_font)
+        draw.text((42, 38), f"TOP Героев — {decade_title}", fill="#f8fafc", font=title_font)
 
         y = 100
 
@@ -3893,9 +3962,9 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
                 y_pos += row_h
             return y_pos
 
-        y = draw_section("📆 Лидеры декады", decade_leaders, y)
+        y = draw_section("Лидеры декады", decade_leaders, y)
         y += 16
-        y = draw_section("⚡ Лидеры активной смены", active_leaders, y)
+        y = draw_section("Лидеры активной смены", active_leaders, y)
 
         out = BytesIO()
         out.name = "leaderboard.png"
@@ -3912,13 +3981,18 @@ async def send_leaderboard_output(chat_target, context: CallbackContext, decade_
     image = build_leaderboard_image_bytes(decade_title, decade_leaders, active_leaders)
     if image is not None:
         logger.info("Leaderboard output mode: PNG image")
-        await context.bot.send_photo(
-            chat_id=chat_target.chat_id,
-            photo=image,
-            caption=text_message[:1024],
-            reply_markup=reply_markup,
-        )
-        return
+        try:
+            await context.bot.send_photo(
+                chat_id=chat_target.chat_id,
+                photo=image,
+                caption=text_message[:1024],
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception:
+            logger.error("Leaderboard output fallback reason: send_photo failed\n%s", traceback.format_exc())
+
+    logger.warning("Leaderboard output mode: text fallback")
 
     logger.warning("Leaderboard output mode: text fallback")
 
