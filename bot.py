@@ -3994,6 +3994,8 @@ async def send_leaderboard_output(chat_target, context: CallbackContext, decade_
 
     logger.warning("Leaderboard output mode: text fallback")
 
+    logger.warning("Leaderboard output mode: text fallback")
+
     await send_text_with_optional_photo(
         chat_target,
         context,
