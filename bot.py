@@ -4041,8 +4041,6 @@ async def send_leaderboard_output(chat_target, context: CallbackContext, decade_
             except Exception:
                 logger.error("Leaderboard output fallback reason: send_document failed\n%s", traceback.format_exc())
 
-    logger.warning("Leaderboard output mode: text fallback")
-
     await send_text_with_optional_photo(
         chat_target,
         context,
