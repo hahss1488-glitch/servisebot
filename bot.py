@@ -12,6 +12,8 @@ import shutil
 import calendar
 import re
 import importlib.util
+import traceback
+import sys
 from io import BytesIO
 from typing import List
 
@@ -865,11 +867,14 @@ def get_goal_text(user_id: int) -> str:
     if not DatabaseManager.is_goal_enabled(user_id):
         return ""
 
-    goal = DatabaseManager.get_daily_goal(user_id)
+    goal = max(0, int(DatabaseManager.get_daily_goal(user_id) or 0))
+    today_total = int(DatabaseManager.get_user_total_for_date(user_id, now_local().date().isoformat()) or 0)
+
     if goal <= 0:
-        return ""
-    today_total = DatabaseManager.get_user_total_for_date(user_id, now_local().date().isoformat())
-    return f"Заработано {today_total} из {goal}₽"
+        return f"🎯 Цель дня включена\n💰 Заработано: {format_money(today_total)}\n⚠️ Цель не задана"
+
+    percent = calculate_percent(today_total, goal)
+    return f"🎯 Цель дня\n💰 {format_money(today_total)} / {format_money(goal)} ({percent}%)"
 
 
 def calculate_current_decade_daily_goal(db_user: dict) -> int:
@@ -962,7 +967,7 @@ def create_db_backup() -> str:
     shutil.copy2(DB_PATH, path)
     return path
 
-async def ensure_goal_message_pinned(context: CallbackContext, chat_id: int, message_id: int) -> None:
+async def ensure_goal_message_pinned(context: CallbackContext, chat_id: int, message_id: int) -> bool:
     """Пытаемся закрепить сообщение с целью в любом чате, где это поддерживается."""
     try:
         await context.bot.pin_chat_message(
@@ -970,25 +975,41 @@ async def ensure_goal_message_pinned(context: CallbackContext, chat_id: int, mes
             message_id=message_id,
             disable_notification=True,
         )
+        return True
     except Exception:
-        # Для чатов/ролей без прав на закреп просто пропускаем.
-        pass
+        logger.warning(
+            "Goal pin skipped: no rights or unsupported chat (chat_id=%s, message_id=%s)",
+            chat_id,
+            message_id,
+            exc_info=True,
+        )
+        return False
 
 
 async def send_goal_status(update: Update | None, context: CallbackContext, user_id: int, source_message=None):
-    """Обновить закреп по цели, только если цель включена пользователем."""
-    goal_text = get_goal_text(user_id)
-    if not goal_text:
+    """Обновить закреп по цели, только если цель включена пользователем и есть активная смена."""
+    active_shift = DatabaseManager.get_active_shift(user_id)
+    if not DatabaseManager.is_goal_enabled(user_id) or not active_shift:
+        await disable_goal_status(context, user_id)
         return
 
+    goal_text = get_goal_text(user_id)
+    if not goal_text:
+        await disable_goal_status(context, user_id)
+        return
+
+    bind_chat_id, bind_message_id = DatabaseManager.get_goal_message_binding(user_id)
     source_message = source_message or (update.message if update and update.message else None) or (
         update.callback_query.message if update and update.callback_query else None
     )
-    if not source_message:
-        return
 
-    chat_id = source_message.chat_id
-    bind_chat_id, bind_message_id = DatabaseManager.get_goal_message_binding(user_id)
+    if source_message:
+        chat_id = source_message.chat_id
+    elif bind_chat_id and bind_message_id:
+        chat_id = int(bind_chat_id)
+    else:
+        logger.warning("Goal status skipped: no source message and no existing binding (user_id=%s)", user_id)
+        return
 
     if bind_chat_id and int(bind_chat_id) != int(chat_id):
         DatabaseManager.clear_goal_message_binding(user_id)
@@ -997,14 +1018,20 @@ async def send_goal_status(update: Update | None, context: CallbackContext, user
     if bind_chat_id and bind_message_id:
         try:
             await context.bot.edit_message_text(chat_id=bind_chat_id, message_id=bind_message_id, text=goal_text)
-            await ensure_goal_message_pinned(context, int(bind_chat_id), int(bind_message_id))
-            return
+            pin_ok = await ensure_goal_message_pinned(context, int(bind_chat_id), int(bind_message_id))
+            if pin_ok:
+                return
+            logger.warning("Goal status was updated, but pin failed; recreating message (user_id=%s)", user_id)
         except Exception:
+            logger.warning("Goal status edit failed, recreating message (user_id=%s)", user_id, exc_info=True)
             DatabaseManager.clear_goal_message_binding(user_id)
 
-    message = await source_message.reply_text(goal_text)
-    DatabaseManager.set_goal_message_binding(user_id, chat_id, message.message_id)
-    await ensure_goal_message_pinned(context, message.chat_id, message.message_id)
+    if not source_message:
+        sent = await context.bot.send_message(chat_id=chat_id, text=goal_text)
+    else:
+        sent = await source_message.reply_text(goal_text)
+    DatabaseManager.set_goal_message_binding(user_id, int(sent.chat_id), int(sent.message_id))
+    await ensure_goal_message_pinned(context, sent.chat_id, sent.message_id)
 
 
 async def disable_goal_status(context: CallbackContext, user_id: int) -> None:
@@ -1093,6 +1120,7 @@ async def menu_command(update: Update, context: CallbackContext):
         "Главное меню открыто.",
         reply_markup=main_menu_for_db_user(db_user, subscription_active)
     )
+    await send_goal_status(update, context, db_user['id'])
     await send_period_reports_for_user(context.application, db_user)
 
 def create_nav_hub_keyboard(section: str, has_active_shift: bool = False, is_admin: bool = False) -> InlineKeyboardMarkup:
@@ -1329,14 +1357,6 @@ async def handle_message(update: Update, context: CallbackContext):
                 "❌ Нет активной смены! Сначала откройте смену."
             )
             context.user_data.pop('awaiting_car_number', None)
-            await update.message.reply_text(
-        "Введите номер машины:\n\n"
-        "Примеры:\n"
-        "• А123ВС777\n"
-        "• Х340РУ797\n"
-        "• В567ТХ799\n\n"
-        "Можно вводить русскими или английскими буквами."
-    )
             return
         
         # Добавляем машину
@@ -3691,7 +3711,7 @@ async def close_shift_confirm_yes(query, context, data):
 
     total = DatabaseManager.get_shift_total(shift_id)
     DatabaseManager.close_shift(shift_id)
-    DatabaseManager.clear_goal_message_binding(db_user['id'])
+    await disable_goal_status(context, db_user['id'])
     closed_shift = DatabaseManager.get_shift(shift_id) or shift
     cars = DatabaseManager.get_shift_cars(shift_id)
     message = build_closed_shift_dashboard(closed_shift, cars, total)
@@ -3816,73 +3836,82 @@ def _load_rank_font(image_font, size: int):
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ):
         try:
+            logger.debug("Leaderboard font loaded: %s", path)
             return image_font.truetype(path, size=size)
         except Exception:
             continue
     try:
+        logger.warning("Leaderboard font fallback: DejaVu not found, using PIL default font")
         return image_font.load_default()
     except Exception:
+        logger.exception("Leaderboard font fallback failed: default PIL font unavailable")
         return None
 
 
 def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], active_leaders: list[dict]) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
+        logger.warning("Leaderboard image fallback reason: Pillow not available in current Python environment")
         return None
+    try:
+        from PIL import Image, ImageDraw, ImageFont
 
-    from PIL import Image, ImageDraw, ImageFont
+        width = 920
+        row_h = 44
+        header_h = 90
+        section_h = 52
+        rows = max(len(decade_leaders), 1) + max(len(active_leaders), 1)
+        height = header_h + section_h * 2 + rows * row_h + 90
 
-    width = 920
-    row_h = 44
-    header_h = 90
-    section_h = 52
-    rows = max(len(decade_leaders), 1) + max(len(active_leaders), 1)
-    height = header_h + section_h * 2 + rows * row_h + 90
+        img = Image.new("RGB", (width, height), "#0f172a")
+        draw = ImageDraw.Draw(img)
 
-    img = Image.new("RGB", (width, height), "#0f172a")
-    draw = ImageDraw.Draw(img)
+        title_font = _load_rank_font(ImageFont, 34)
+        sec_font = _load_rank_font(ImageFont, 24)
+        row_font = _load_rank_font(ImageFont, 22)
 
-    title_font = _load_rank_font(ImageFont, 34)
-    sec_font = _load_rank_font(ImageFont, 24)
-    row_font = _load_rank_font(ImageFont, 22)
+        draw.rounded_rectangle((20, 20, width - 20, height - 20), radius=22, fill="#111827", outline="#334155", width=2)
+        draw.text((42, 38), f"🏆 Топ героев — {decade_title}", fill="#f8fafc", font=title_font)
 
-    draw.rounded_rectangle((20, 20, width - 20, height - 20), radius=22, fill="#111827", outline="#334155", width=2)
-    draw.text((42, 38), f"🏆 Топ героев — {decade_title}", fill="#f8fafc", font=title_font)
+        y = 100
 
-    y = 100
-    def draw_section(title: str, leaders: list[dict], y_pos: int) -> int:
-        draw.rectangle((36, y_pos, width - 36, y_pos + 36), fill="#1e293b")
-        draw.text((48, y_pos + 7), title, fill="#e2e8f0", font=sec_font)
-        y_pos += 44
+        def draw_section(title: str, leaders: list[dict], y_pos: int) -> int:
+            draw.rectangle((36, y_pos, width - 36, y_pos + 36), fill="#1e293b")
+            draw.text((48, y_pos + 7), title, fill="#e2e8f0", font=sec_font)
+            y_pos += 44
 
-        if not leaders:
-            draw.text((60, y_pos + 8), "Пока нет данных", fill="#94a3b8", font=row_font)
-            return y_pos + row_h
+            if not leaders:
+                draw.text((60, y_pos + 8), "Пока нет данных", fill="#94a3b8", font=row_font)
+                return y_pos + row_h
 
-        for place, leader in enumerate(leaders, start=1):
-            bg = "#0b1220" if place % 2 else "#0a1020"
-            draw.rectangle((36, y_pos, width - 36, y_pos + row_h - 4), fill=bg)
-            draw.text((54, y_pos + 9), f"{place}", fill="#93c5fd", font=row_font)
-            draw.text((110, y_pos + 9), str(leader.get("name", "—"))[:24], fill="#f8fafc", font=row_font)
-            draw.text((480, y_pos + 9), format_money(int(leader.get("total_amount", 0))), fill="#86efac", font=row_font)
-            draw.text((720, y_pos + 9), f"смен: {int(leader.get('shift_count', 0))}", fill="#cbd5e1", font=row_font)
-            y_pos += row_h
-        return y_pos
+            for place, leader in enumerate(leaders, start=1):
+                bg = "#0b1220" if place % 2 else "#0a1020"
+                draw.rectangle((36, y_pos, width - 36, y_pos + row_h - 4), fill=bg)
+                draw.text((54, y_pos + 9), f"{place}", fill="#93c5fd", font=row_font)
+                draw.text((110, y_pos + 9), str(leader.get("name", "—"))[:24], fill="#f8fafc", font=row_font)
+                draw.text((480, y_pos + 9), format_money(int(leader.get("total_amount", 0))), fill="#86efac", font=row_font)
+                draw.text((720, y_pos + 9), f"смен: {int(leader.get('shift_count', 0))}", fill="#cbd5e1", font=row_font)
+                y_pos += row_h
+            return y_pos
 
-    y = draw_section("📆 Лидеры декады", decade_leaders, y)
-    y += 16
-    y = draw_section("⚡ Лидеры активной смены", active_leaders, y)
+        y = draw_section("📆 Лидеры декады", decade_leaders, y)
+        y += 16
+        y = draw_section("⚡ Лидеры активной смены", active_leaders, y)
 
-    out = BytesIO()
-    out.name = "leaderboard.png"
-    img.save(out, format="PNG")
-    out.seek(0)
-    return out
+        out = BytesIO()
+        out.name = "leaderboard.png"
+        img.save(out, format="PNG")
+        out.seek(0)
+        return out
+    except Exception:
+        logger.error("Leaderboard image fallback reason: render error\n%s", traceback.format_exc())
+        return None
 
 
 async def send_leaderboard_output(chat_target, context: CallbackContext, decade_title: str, decade_leaders: list[dict], active_leaders: list[dict], reply_markup=None):
     text_message = build_leaderboard_text(decade_title, decade_leaders, active_leaders)
     image = build_leaderboard_image_bytes(decade_title, decade_leaders, active_leaders)
     if image is not None:
+        logger.info("Leaderboard output mode: PNG image")
         await context.bot.send_photo(
             chat_id=chat_target.chat_id,
             photo=image,
@@ -3890,6 +3919,8 @@ async def send_leaderboard_output(chat_target, context: CallbackContext, decade_
             reply_markup=reply_markup,
         )
         return
+
+    logger.warning("Leaderboard output mode: text fallback")
 
     await send_text_with_optional_photo(
         chat_target,
@@ -3910,6 +3941,7 @@ async def leaderboard(query, context):
     db_user = DatabaseManager.get_user(query.from_user.id)
     has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
     await query.edit_message_text("🏆 Формирую рейтинг...")
+    logger.info("Leaderboard callback handler: send_leaderboard_output called")
     await send_leaderboard_output(
         query.message,
         context,
@@ -4076,6 +4108,7 @@ async def leaderboard_message(update: Update, context: CallbackContext):
 
     db_user = DatabaseManager.get_user(update.effective_user.id)
     has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
+    logger.info("Leaderboard message handler: send_leaderboard_output called")
     await send_leaderboard_output(
         update.message,
         context,
@@ -4587,10 +4620,21 @@ async def on_startup(application: Application):
     await notify_shift_close_prompts(application)
 
 
+def log_runtime_environment() -> None:
+    pillow_spec = importlib.util.find_spec("PIL")
+    logger.info("Runtime Python executable: %s", sys.executable)
+    logger.info("Runtime Python version: %s", sys.version.split()[0])
+    if pillow_spec is None:
+        logger.warning("Pillow runtime check: PIL module not found")
+    else:
+        logger.info("Pillow runtime check: PIL module found at %s", pillow_spec.origin)
+
+
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 
 def main():
     """Запуск бота"""
+    log_runtime_environment()
     application = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
     
     # Регистрация команд
