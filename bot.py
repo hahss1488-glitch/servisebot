@@ -315,7 +315,7 @@ def is_allowed_when_expired_menu(text: str) -> bool:
 
 
 def is_allowed_when_expired_callback(data: str) -> bool:
-    return data in {"subscription_info", "account_info", "back"}
+    return data in {"subscription_info", "subscription_info_photo", "account_info", "back"}
 
 
 def activate_subscription_days(user_id: int, days: int) -> datetime:
@@ -2766,7 +2766,8 @@ def create_faq_topics_keyboard(topics: list[dict], is_admin: bool = False) -> In
         [InlineKeyboardButton(f"{icon_map.get(topic.get('id'), '📘')} {topic['title']}", callback_data=f"faq_topic_{topic['id']}")]
         for topic in topics
     ]
-    keyboard.append([InlineKeyboardButton("🛠️ Управление FAQ", callback_data="admin_faq_menu")])
+    if is_admin:
+        keyboard.append([InlineKeyboardButton("🛠️ Управление FAQ", callback_data="admin_faq_menu")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -4565,7 +4566,7 @@ async def notify_subscription_events(application: Application):
                     pass
                 DatabaseManager.set_app_content(key, "1")
 
-        if days_left < 0:
+        if days_left <= 0:
             key = f"sub_notice_expired_{row['id']}_{expires_date.isoformat()}"
             if DatabaseManager.get_app_content(key, "") != "1":
                 try:
