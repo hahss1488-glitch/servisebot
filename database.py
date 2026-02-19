@@ -70,6 +70,7 @@ def init_database():
         price_mode TEXT DEFAULT 'day',
         last_decade_notified TEXT DEFAULT '',
         is_blocked INTEGER DEFAULT 0,
+        include_in_leaderboard INTEGER DEFAULT 1,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
 
@@ -106,6 +107,8 @@ def init_database():
         cur.execute("ALTER TABLE user_settings ADD COLUMN last_decade_notified TEXT DEFAULT ''")
     if "is_blocked" not in columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN is_blocked INTEGER DEFAULT 0")
+    if "include_in_leaderboard" not in columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN include_in_leaderboard INTEGER DEFAULT 1")
     if "goal_enabled" not in columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN goal_enabled INTEGER DEFAULT 0")
     if "goal_chat_id" not in columns:
@@ -176,6 +179,7 @@ class DatabaseManager:
         cur.execute(
             """SELECT u.id, u.telegram_id, u.name, u.created_at,
             COALESCE(us.is_blocked, 0) as is_blocked,
+            COALESCE(us.include_in_leaderboard, 1) as include_in_leaderboard,
             COALESCE(COUNT(DISTINCT s.id), 0) as shifts_count,
             COALESCE(SUM(c.total_amount), 0) as total_amount
             FROM users u
@@ -424,6 +428,7 @@ class DatabaseManager:
             LEFT JOIN cars c ON c.shift_id = s.id
             LEFT JOIN user_settings us ON us.user_id = u.id
             WHERE COALESCE(us.is_blocked, 0) = 0
+              AND COALESCE(us.include_in_leaderboard, 1) = 1
             GROUP BY u.id
             ORDER BY total_amount DESC
             LIMIT ?""",
@@ -453,6 +458,7 @@ class DatabaseManager:
             JOIN cars c ON c.shift_id = s.id
             LEFT JOIN user_settings us ON us.user_id = u.id
             WHERE COALESCE(us.is_blocked, 0) = 0
+              AND COALESCE(us.include_in_leaderboard, 1) = 1
               AND CAST(strftime('%Y', s.start_time) AS INTEGER) = ?
               AND CAST(strftime('%m', s.start_time) AS INTEGER) = ?
               AND CAST(strftime('%d', s.start_time) AS INTEGER) BETWEEN ? AND ?
@@ -464,6 +470,28 @@ class DatabaseManager:
         rows = cur.fetchall()
         conn.close()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def is_user_in_leaderboard(user_id: int) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT include_in_leaderboard FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        return not row or int(row["include_in_leaderboard"] or 1) == 1
+
+    @staticmethod
+    def set_user_in_leaderboard(user_id: int, include: bool) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO user_settings (user_id, include_in_leaderboard)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET include_in_leaderboard = excluded.include_in_leaderboard""",
+            (user_id, 1 if include else 0)
+        )
+        conn.commit()
+        conn.close()
 
     @staticmethod
     def get_user_total_between_dates(user_id: int, start_date: str, end_date: str) -> int:
