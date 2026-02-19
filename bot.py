@@ -1783,6 +1783,7 @@ async def handle_callback(update: Update, context: CallbackContext):
         ("combo_builder_toggle_", combo_builder_toggle),
         ("admin_user_", admin_user_card),
         ("admin_toggle_block_", admin_toggle_block),
+        ("admin_toggle_leaderboard_", admin_toggle_leaderboard),
         ("admin_activate_month_", admin_activate_month),
         ("admin_activate_days_prompt_", admin_activate_days_prompt),
         ("admin_broadcast_user_", lambda q, c, d: admin_broadcast_prepare(q, c, d.replace("admin_broadcast_user_", ""))),
@@ -2065,6 +2066,7 @@ async def admin_user_card(query, context, data):
         await query.answer("Пользователь не найден")
         return
     blocked = bool(int(row.get("is_blocked", 0)))
+    include_in_leaderboard = bool(int(row.get("include_in_leaderboard", 1)))
     target_user = DatabaseManager.get_user_by_id(user_id)
     expires = subscription_expires_at_for_user(target_user) if target_user else None
     sub_status = "♾️ Админ" if is_admin_telegram(int(row["telegram_id"])) else (
@@ -2072,6 +2074,10 @@ async def admin_user_card(query, context, data):
     )
     keyboard = [
         [InlineKeyboardButton("🔓 Открыть доступ" if blocked else "⛔ Закрыть доступ", callback_data=f"admin_toggle_block_{user_id}")],
+        [InlineKeyboardButton(
+            "🏆 Учитывать в лидерборде: ДА" if include_in_leaderboard else "🏆 Учитывать в лидерборде: НЕТ",
+            callback_data=f"admin_toggle_leaderboard_{user_id}",
+        )],
         [InlineKeyboardButton("🗓️ Активировать на месяц", callback_data=f"admin_activate_month_{user_id}")],
         [InlineKeyboardButton("✍️ Активировать на N дней", callback_data=f"admin_activate_days_prompt_{user_id}")],
         [InlineKeyboardButton("🔙 К пользователям", callback_data="admin_users")],
@@ -2080,6 +2086,7 @@ async def admin_user_card(query, context, data):
         f"👤 {row['name']}\nTelegram ID: {row['telegram_id']}\n"
         f"Смен: {row['shifts_count']}\nСумма: {format_money(int(row['total_amount'] or 0))}\n"
         f"Статус: {'Заблокирован' if blocked else 'Активен'}\n"
+        f"Лидерборд: {'Учитывается' if include_in_leaderboard else 'Не учитывается'}\n"
         f"Подписка: {sub_status}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2096,6 +2103,20 @@ async def admin_toggle_block(query, context, data):
         return
     new_state = not bool(int(row.get("is_blocked", 0)))
     DatabaseManager.set_user_blocked(user_id, new_state)
+    await admin_user_card(query, context, f"admin_user_{user_id}")
+
+
+async def admin_toggle_leaderboard(query, context, data):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    user_id = int(data.replace("admin_toggle_leaderboard_", ""))
+    users = {u["id"]: u for u in DatabaseManager.get_all_users_with_stats()}
+    row = users.get(user_id)
+    if not row:
+        await query.answer("Пользователь не найден")
+        return
+    new_state = not bool(int(row.get("include_in_leaderboard", 1)))
+    DatabaseManager.set_user_in_leaderboard(user_id, new_state)
     await admin_user_card(query, context, f"admin_user_{user_id}")
 
 
