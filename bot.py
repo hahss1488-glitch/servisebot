@@ -40,7 +40,6 @@ from exports import create_decade_pdf, create_decade_xlsx, create_month_xlsx
 from leaderboard.avatars import get_avatar_image as get_avatar_image_async
 from services.status import send_status, edit_status, done_status
 from ui.texts import STATUS_LEADERBOARD
-from ui.keyboards import onboarding_start_keyboard, onboarding_exit_keyboard
 from ui.nav import push_screen, pop_screen, get_current_screen, Screen
 
 # Настройка логирования
@@ -316,7 +315,7 @@ def is_allowed_when_expired_menu(text: str) -> bool:
 
 
 def is_allowed_when_expired_callback(data: str) -> bool:
-    return data in {"subscription_info", "account_info", "back"}
+    return data in {"subscription_info", "subscription_info_photo", "account_info", "back"}
 
 
 def activate_subscription_days(user_id: int, days: int) -> datetime:
@@ -1116,10 +1115,6 @@ async def start_command(update: Update, context: CallbackContext):
             f"Версия: {APP_VERSION}",
             reply_markup=create_main_reply_keyboard(has_active, subscription_active)
         )
-        await update.message.reply_text(
-            "Хочешь пройти быстрый тур? Он покажет базовый процесс работы за 1 минуту.",
-            reply_markup=onboarding_start_keyboard(),
-        )
         await send_goal_status(update, context, db_user['id'])
         await send_period_reports_for_user(context.application, db_user)
 
@@ -1218,8 +1213,8 @@ async def nav_tools_callback(query, context):
 
 async def nav_help_callback(query, context):
     await query.edit_message_text(
-        "🎓 Центр обучения\n\n"
-        "Здесь можно пройти интерактивный обзор всех ключевых функций.",
+        "❓ FAQ\n\n"
+        "Выбери раздел с ответами и гайдами по работе с ботом.",
         reply_markup=create_faq_topics_keyboard(get_faq_topics(), is_admin=is_admin_telegram(query.from_user.id)),
     )
 
@@ -1266,9 +1261,6 @@ async def handle_message(update: Update, context: CallbackContext):
     db_user_for_access, blocked, subscription_active = resolve_user_access(user.id, context)
     if blocked:
         await update.message.reply_text("⛔ Доступ к боту закрыт администратором.")
-        return
-
-    if await demo_handle_car_text(update, context):
         return
 
     # Быстрый ввод: "номер + сокращения услуг"
@@ -1683,25 +1675,6 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "account_info": account_info_callback,
         "show_price": show_price_callback,
         "calendar_open": calendar_callback,
-        "faq_overview": faq_overview_callback,
-        "faq_start_demo": demo_start,
-        "demo_step_shift": demo_step_shift_callback,
-        "demo_step_services": lambda q, c: demo_render_card(q, c, "services"),
-        "demo_step_services_adv": lambda q, c: demo_render_card(q, c, "services_adv"),
-        "demo_step_calendar": lambda q, c: demo_render_card(q, c, "calendar"),
-        "demo_step_leaderboard": lambda q, c: demo_render_card(q, c, "leaderboard"),
-        "demo_step_done": lambda q, c: demo_render_card(q, c, "done"),
-        "demo_exit": demo_exit_callback,
-        "onb:start": onboarding_start,
-        "onb:skip": onboarding_skip,
-        "onb:exit": onboarding_exit,
-        "onb:step_shift": onboarding_step_shift,
-        "onb:step_car": onboarding_step_car,
-        "onb:step_services": onboarding_step_services,
-        "onb:save_services": onboarding_save_services,
-        "onb:step_dashboard": onboarding_step_dashboard,
-        "onb:step_top": onboarding_step_top,
-        "onb:finish": onboarding_finish,
         "nav:back": nav_back_callback,
         "admin_faq_menu": admin_faq_menu,
         "admin_media_menu": admin_media_menu,
@@ -1731,19 +1704,6 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
     return True
 
 
-async def demo_step_shift_callback(query, context):
-    context.user_data["demo_mode"] = True
-    context.user_data["demo_waiting_car"] = True
-    await demo_render_card(query, context, "shift")
-
-
-async def demo_exit_callback(query, context):
-    context.user_data.pop("demo_mode", None)
-    context.user_data.pop("demo_waiting_car", None)
-    context.user_data.pop("demo_payload", None)
-    await query.edit_message_text("Демо завершено. Нажми ❓ FAQ, чтобы пройти снова.")
-
-
 async def nav_back_callback(query, context):
     pop_screen(context)
     prev = get_current_screen(context)
@@ -1754,155 +1714,7 @@ async def nav_back_callback(query, context):
         await query.message.reply_text("Выбери действие:", reply_markup=create_main_reply_keyboard(has_active))
         return
 
-    name = prev.name
-    if name == "onboarding_start":
-        await onboarding_start(query, context)
-    elif name == "onboarding_shift":
-        await onboarding_step_shift(query, context)
-    elif name == "onboarding_car":
-        await onboarding_step_car(query, context)
-    elif name == "onboarding_services":
-        await onboarding_step_services(query, context)
-    elif name == "onboarding_dashboard":
-        await onboarding_step_dashboard(query, context)
-    else:
-        await query.edit_message_text("Главное меню уже внизу 👇")
-
-
-def _onb_state(context):
-    return context.user_data.setdefault("onboarding_state", {"mode": "demo", "services": [], "cars": 0, "amount": 0})
-
-
-async def onboarding_start(query, context):
-    push_screen(context, Screen(name="onboarding_start", kind="inline"))
-    st = _onb_state(context)
-    st["mode"] = "demo"
-    st["services"] = []
-    st["cars"] = 0
-    st["amount"] = 0
-    await query.edit_message_text(
-        "🚀 Быстрый тур\n\n"
-        "Шаг 1/4: Открываем смену в демо-режиме (реальные данные не изменяются).",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Открыть смену (демо)", callback_data="onb:step_shift")],
-            [InlineKeyboardButton("✖️ Выйти из тура", callback_data="onb:exit")],
-        ])
-    )
-
-
-async def onboarding_skip(query, context):
-    await query.edit_message_text("Окей, пропускаем тур. Можешь начать работу с меню ниже 👇")
-
-
-async def onboarding_exit(query, context):
-    context.user_data.pop("onboarding_state", None)
-    await query.edit_message_text("Тур завершён. В любой момент можно запустить снова из FAQ.")
-
-
-async def onboarding_step_shift(query, context):
-    push_screen(context, Screen(name="onboarding_shift", kind="inline"))
-    await query.edit_message_text(
-        "✅ Шаг 1/4: Смена в демо открыта.\n\n"
-        "Теперь добавим машину.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Добавить машину (демо)", callback_data="onb:step_car")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="nav:back")],
-            [InlineKeyboardButton("✖️ Выйти из тура", callback_data="onb:exit")],
-        ])
-    )
-
-
-async def onboarding_step_car(query, context):
-    push_screen(context, Screen(name="onboarding_car", kind="inline"))
-    st = _onb_state(context)
-    st["cars"] = 1
-    await query.edit_message_text(
-        "🚗 Шаг 2/4: Машина добавлена в демо.\n\n"
-        "Выбери 2-3 услуги как в реальном процессе.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧼 Проверка", callback_data="onb:svc_1"), InlineKeyboardButton("⛽ Заправка", callback_data="onb:svc_2")],
-            [InlineKeyboardButton("🧴 Омывайка", callback_data="onb:svc_3"), InlineKeyboardButton("🅿️ Перепарковка", callback_data="onb:svc_14")],
-            [InlineKeyboardButton("💾 Сохранить (демо)", callback_data="onb:save_services")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="nav:back")],
-            [InlineKeyboardButton("✖️ Выйти из тура", callback_data="onb:exit")],
-        ])
-    )
-
-
-async def onboarding_step_services(query, context):
-    st = _onb_state(context)
-    selected = st.get("services", [])
-    amount = sum(get_current_price(sid, "day") for sid in selected)
-    st["amount"] = amount
-    await query.edit_message_text(
-        f"🧾 Шаг 2/4: Услуги выбраны.\nВыбрано: {len(selected)}\nСумма: {format_money(amount)}",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💾 Сохранить (демо)", callback_data="onb:save_services")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="nav:back")],
-            [InlineKeyboardButton("✖️ Выйти из тура", callback_data="onb:exit")],
-        ])
-    )
-
-
-async def onboarding_toggle_service(query, context, data):
-    sid = int(data.replace("onb:svc_", ""))
-    st = _onb_state(context)
-    selected = st.get("services", [])
-    if sid in selected:
-        selected.remove(sid)
-    else:
-        selected.append(sid)
-    st["services"] = selected
-    context.user_data["onboarding_state"] = st
-    await onboarding_step_services(query, context)
-
-
-async def onboarding_save_services(query, context):
-    push_screen(context, Screen(name="onboarding_services", kind="inline"))
-    await onboarding_step_dashboard(query, context)
-
-
-async def onboarding_step_dashboard(query, context):
-    push_screen(context, Screen(name="onboarding_dashboard", kind="inline"))
-    st = _onb_state(context)
-    cars = st.get("cars", 1)
-    total = st.get("amount", 0)
-    avg = int(total / max(cars, 1))
-    await query.edit_message_text(
-        "📊 Шаг 3/4: Дашборд демо\n\n"
-        f"Машин: {cars}\n"
-        f"Сумма: {format_money(total)}\n"
-        f"Средний чек: {format_money(avg)}",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏆 Показать топ (демо)", callback_data="onb:step_top")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="nav:back")],
-            [InlineKeyboardButton("✖️ Выйти из тура", callback_data="onb:exit")],
-        ])
-    )
-
-
-async def onboarding_step_top(query, context):
-    leaders = [
-        {"name": "Вы", "total_amount": 16500, "shift_count": 3, "telegram_id": query.from_user.id},
-        {"name": "Коллега 1", "total_amount": 18900, "shift_count": 4, "telegram_id": 0},
-        {"name": "Коллега 2", "total_amount": 17200, "shift_count": 3, "telegram_id": 0},
-        {"name": "Коллега 3", "total_amount": 14900, "shift_count": 3, "telegram_id": 0},
-    ]
-    status = await send_status(update=type("U", (), {"callback_query": None, "message": query.message, "effective_chat": query.message.chat})(), context=context, text="🖼 Собираю красивую картинку…")
-    avatars = {1: await get_avatar_image_async(context.bot, query.from_user.id, 140, fallback_name="Вы")}
-    img = build_leaderboard_image_bytes("Демо-декада", leaders, highlight_name="Вы", top3_avatars=avatars)
-    await done_status(status, "✅ Готово! Вот ваш демо-топ.", attach_photo_bytes=img, filename="demo_top.png", caption="🏆 Демо-топ")
-    await query.message.reply_text(
-        "🎉 Шаг 4/4 завершён.\nГотово! Теперь вы умеете всё базовое.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Открыть главное меню", callback_data="back")],
-            [InlineKeyboardButton("Открыть инструменты", callback_data="nav_tools")],
-        ])
-    )
-
-
-async def onboarding_finish(query, context):
-    await query.edit_message_text("Тур завершён.")
+    await query.edit_message_text("Главное меню уже внизу 👇")
 
 
 async def cancel_add_car_callback(query, context):
@@ -1979,12 +1791,9 @@ async def handle_callback(update: Update, context: CallbackContext):
         ("calendar_setup_pick_", calendar_setup_pick_callback),
         ("calendar_setup_save_", calendar_setup_save_callback),
         ("calendar_edit_toggle_", calendar_edit_toggle_callback),
-        ("demo_service_", demo_toggle_service_callback),
-        ("demo_calendar_", demo_toggle_calendar_day_callback),
         ("faq_topic_", faq_topic_callback),
         ("admin_faq_topic_edit_", admin_faq_topic_edit),
         ("admin_faq_topic_del_", admin_faq_topic_del),
-        ("onb:svc_", onboarding_toggle_service),
         ("history_decades_page_", history_decades_page),
         ("history_decade_", history_decade_days),
         ("history_day_", history_day_cars),
@@ -2016,31 +1825,6 @@ async def handle_callback(update: Update, context: CallbackContext):
 
     await query.edit_message_text("❌ Неизвестная команда")
 
-
-async def demo_toggle_calendar_day_callback(query, context, data):
-    key = data.replace("demo_calendar_", "")
-    payload = context.user_data.get("demo_payload", {"services": [], "calendar_days": []})
-    selected = payload.get("calendar_days", [])
-    if key in selected:
-        selected.remove(key)
-    else:
-        selected.append(key)
-    payload["calendar_days"] = selected
-    context.user_data["demo_payload"] = payload
-    await demo_render_card(query, context, "calendar")
-
-
-async def demo_toggle_service_callback(query, context, data):
-    sid = int(data.replace("demo_service_", ""))
-    payload = context.user_data.get("demo_payload", {"services": []})
-    selected = payload.get("services", [])
-    if sid in selected:
-        selected.remove(sid)
-    else:
-        selected.append(sid)
-    payload["services"] = selected
-    context.user_data["demo_payload"] = payload
-    await demo_render_card(query, context, "services")
 
 
 
@@ -2935,7 +2719,6 @@ def get_faq_topics() -> list[dict]:
             {"id": "decade", "title": "Что такое декада?", "text": "📊 Что такое декада?\n\nДекада — это 10 дней.\n\nМесяц делится на 3 части:\n1–10\n11–20\n21–конец месяца\n\nЭто удобно для промежуточных итогов и анализа."},
             {"id": "tools", "title": "Что такое “Инструменты”?", "text": "🔧 Что такое “Инструменты”?\n\nЭто дополнительный экран с расширенными функциями:\n• история\n• отчёты\n• аналитика\n• комбо\n• настройки\n\nЭто панель управления.\n\nЧтобы вернуться — нажми “Назад”."},
             {"id": "combo", "title": "Что такое “Комбо”?", "text": "💾 Что такое “Комбо”?\n\nКомбо — это набор услуг, который ты часто используешь.\n\nМожно сохранить набор и добавлять его одним нажатием.\n\nЭто ускоряет работу в 2–3 раза."},
-            {"id": "demo", "title": "Что такое демо-режим?", "text": "🧪 Что такое демо-режим?\n\nДемо — это обучение.\n\nМожно:\n• попробовать открыть смену\n• добавить машину\n• посмотреть топ\n\nИ при этом не испортить реальные данные.\n\nЕсли ты новичок — начни с демо."},
             {"id": "issues", "title": "Что делать, если что-то пошло не так?", "text": "🔄 Что делать, если что-то пошло не так?\n\n1) Проверь, открыта ли смена.\n2) Вернись в главное меню.\n3) Попробуй /start.\n4) Если проблема остаётся — обратись в поддержку.\n\nБот старается не терять данные, но лучше закрывать смену корректно."},
             {"id": "support", "title": "Поддержка", "text": "🆘 Поддержка\n\nЕсли что-то работает странно, есть идеи по улучшению или нашли баг — напишите напрямую:\n\n👉 @dakonoplev2\n\nЛучше сразу коротко описать проблему и что именно вы делали в момент ошибки."},
         ]
@@ -2966,10 +2749,6 @@ def save_faq_topics(topics: list[dict]) -> None:
     DatabaseManager.set_app_content("faq_topics_json", json.dumps(topics, ensure_ascii=False))
 
 
-def create_faq_demo_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Запустить обучение", callback_data="faq_start_demo")]])
-
-
 def create_faq_topics_keyboard(topics: list[dict], is_admin: bool = False) -> InlineKeyboardMarkup:
     icon_map = {
         "shift": "🟢",
@@ -2987,8 +2766,8 @@ def create_faq_topics_keyboard(topics: list[dict], is_admin: bool = False) -> In
         [InlineKeyboardButton(f"{icon_map.get(topic.get('id'), '📘')} {topic['title']}", callback_data=f"faq_topic_{topic['id']}")]
         for topic in topics
     ]
-    keyboard.append([InlineKeyboardButton("🚀 Запустить обучение", callback_data="faq_start_demo")])
-    keyboard.append([InlineKeyboardButton("🛠️ Управление FAQ", callback_data="admin_faq_menu")])
+    if is_admin:
+        keyboard.append([InlineKeyboardButton("🛠️ Управление FAQ", callback_data="admin_faq_menu")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -3000,8 +2779,8 @@ async def send_faq(chat_target, context: CallbackContext):
     topics = get_faq_topics()
 
     header = faq_text or (
-        "🎓 Обучение и FAQ\n"
-        "Выбери раздел с гайдом или запусти обучение."
+        "❓ FAQ\n"
+        "Выбери раздел с ответами и гайдами по работе с ботом."
     )
 
     if faq_video:
@@ -3029,188 +2808,6 @@ async def send_faq(chat_target, context: CallbackContext):
         "Выбери раздел FAQ:",
         reply_markup=create_faq_topics_keyboard([], False),
     )
-
-
-def build_feature_overview_text() -> str:
-    return (
-        "🗺️ Полный обзор функций\n\n"
-        "1) 🚘 Работа в смене\n"
-        "• Открываешь смену\n"
-        "• Вводишь номер ТС\n"
-        "• Выбираешь услуги кнопками, поиск или комбо\n"
-        "• Фиксируешь сумму по машине и смене\n\n"
-        "2) 📊 Аналитика и отчёты\n"
-        "• История по декадам\n"
-        "• Эффективность текущей декады\n"
-        "• Топ героев\n"
-        "• Экспорт PDF/XLSX\n\n"
-        "3) 🧰 Инструменты\n"
-        "• Прайс день/ночь\n"
-        "• Календарь смен и план\n"
-        "• Настройки и комбо\n\n"
-        "4) 👤 Профиль и доступ\n"
-        "• Статус подписки\n"
-        "• Продление\n"
-        "• Управление аккаунтом\n\n"
-        "Хочешь быстро освоиться — запусти интерактивное обучение ниже."
-    )
-
-
-async def faq_overview_callback(query, context):
-    await query.edit_message_text(
-        "Раздел отключён. Используй кнопки FAQ.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="faq")]]),
-    )
-
-
-async def demo_render_card(query, context, step: str):
-    payload = context.user_data.get("demo_payload", {"services": [], "calendar_days": [], "car_number": ""})
-    services = payload.get("services", [])
-    car_number = payload.get("car_number", "Х340РУ797")
-    calendar_days = payload.get("calendar_days", [])
-
-    if step == "start":
-        text = (
-            "👋 Добро пожаловать в интерактивное обучение.\n\n"
-            "Это тренажёр на реальном интерфейсе бота (без сохранения в историю).\n\n"
-            "Шаги:\n"
-            "1) Открытие смены и ввод номера\n"
-            "2) Добавление услуг (как в боевом режиме)\n"
-            "3) Выбор рабочих дней в календаре\n"
-            "4) Просмотр итогов и переход к реальной работе"
-        )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Начать демо", callback_data="demo_step_shift")]])
-    elif step == "shift":
-        text = (
-            "✅ Шаг 1/4: Смена открыта (демо).\n"
-            "Отправьте номер авто в чат — как в обычной работе.\n"
-            "Например: Х340РУ"
-        )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏭ Использовать пример номера", callback_data="demo_step_services")]])
-        context.user_data["demo_waiting_car"] = True
-    elif step == "services":
-        total = sum(get_current_price(sid, "day") for sid in services)
-        text = (
-            f"🚗 Шаг 2/4: Машина {car_number}\n"
-            "Добавьте услуги так же, как в реальной смене.\n"
-            "Ничего не сохранится в историю.\n\n"
-            f"Выбрано услуг: {len(services)}\n"
-            f"Сумма по машине: {format_money(total)}"
-        )
-        rows = []
-        for sid in [1, 2, 3, 4, 5, 6, 7, 8]:
-            mark = "✅" if sid in services else "▫️"
-            rows.append([InlineKeyboardButton(f"{mark} {plain_service_name(SERVICES[sid]['name'])}", callback_data=f"demo_service_{sid}")])
-        rows.append([InlineKeyboardButton("➡️ Ещё услуги", callback_data="demo_step_services_adv")])
-        rows.append([InlineKeyboardButton("📅 К календарю демо", callback_data="demo_step_calendar")])
-        kb = InlineKeyboardMarkup(rows)
-    elif step == "services_adv":
-        total = sum(get_current_price(sid, "day") for sid in services)
-        text = (
-            f"🚗 Шаг 2/4: Машина {car_number} (доп. услуги)\n"
-            "Редкие услуги из того же прайса.\n\n"
-            f"Выбрано услуг: {len(services)}\n"
-            f"Сумма по машине: {format_money(total)}"
-        )
-        rows = []
-        for sid in [9, 12, 13, 14, 16, 18, 19, 21]:
-            mark = "✅" if sid in services else "▫️"
-            rows.append([InlineKeyboardButton(f"{mark} {plain_service_name(SERVICES[sid]['name'])}", callback_data=f"demo_service_{sid}")])
-        rows.append([InlineKeyboardButton("⬅️ К основным", callback_data="demo_step_services")])
-        rows.append([InlineKeyboardButton("📅 К календарю демо", callback_data="demo_step_calendar")])
-        kb = InlineKeyboardMarkup(rows)
-    elif step == "calendar":
-        today = now_local().date()
-        week_dates = [today + timedelta(days=i) for i in range(7)]
-        selected_count = len(calendar_days)
-        selected_hint = ", ".join(d[-5:] for d in calendar_days[:5]) if calendar_days else "не выбраны"
-        text = (
-            "📅 Шаг 3/4: Календарь (тренажёр).\n"
-            "Выберите рабочие дни на ближайшую неделю.\n"
-            "Это поможет понять логику планирования смен.\n\n"
-            f"Отмечено дней: {selected_count}\n"
-            f"Выбрано: {selected_hint}\n\n"
-            "ℹ️ В демо календарь не меняет реальные данные аккаунта."
-        )
-        rows = []
-        for d in week_dates:
-            key = d.isoformat()
-            mark = "✅" if key in calendar_days else "▫️"
-            rows.append([InlineKeyboardButton(f"{mark} {d.strftime('%a %d.%m')}", callback_data=f"demo_calendar_{key}")])
-        rows.append([
-            InlineKeyboardButton("⬅️ К услугам", callback_data="demo_step_services_adv"),
-            InlineKeyboardButton("⏭ Дальше", callback_data="demo_step_leaderboard"),
-        ])
-        kb = InlineKeyboardMarkup(rows)
-    elif step == "leaderboard":
-        today = now_local().date()
-        idx, _, _, _, decade_title = get_decade_period(today)
-        decade_leaders = DatabaseManager.get_decade_leaderboard(today.year, today.month, idx)
-        top_block = "\n".join(
-            f"{place}. {row['name']} — {format_money(int(row['total_amount'] or 0))}"
-            for place, row in enumerate(decade_leaders[:5], start=1)
-        ) if decade_leaders else "Пока нет данных по декаде."
-        text = (
-            "📊 Шаг 4/4: Итог демо и аналитика.\n"
-            f"Декада: {decade_title}\n"
-            f"Машина: {car_number}\n"
-            f"Услуг в демо: {len(services)}\n"
-            f"Рабочих дней в демо-календаре: {len(calendar_days)}\n\n"
-            f"{top_block}\n\n"
-            "В реальном режиме данные сохраняются в историю, отчёты и рейтинг."
-        )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Завершить демо", callback_data="demo_step_done")]])
-    elif step == "done":
-        total = sum(get_current_price(sid, "day") for sid in services)
-        text = (
-            "🎉 Отлично! Вы прошли демо.\n\n"
-            f"Услуг выбрано: {len(services)}\n"
-            f"Сумма: {format_money(total)}\n"
-            f"Отмечено смен в календаре: {len(calendar_days)}\n\n"
-            "Теперь можно перейти к реальной работе в боте."
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 К FAQ", callback_data="faq")],
-            [InlineKeyboardButton("✖️ Выйти из демо", callback_data="demo_exit")],
-        ])
-    else:
-        text = "Демо завершено."
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К FAQ", callback_data="faq")]])
-
-    await query.edit_message_text(text, reply_markup=kb)
-
-
-async def demo_start(query, context):
-    context.user_data["demo_mode"] = True
-    context.user_data["demo_payload"] = {"services": [], "calendar_days": [], "car_number": "Х340РУ797"}
-    context.user_data["demo_waiting_car"] = False
-    await demo_render_card(query, context, "start")
-
-
-async def demo_handle_car_text(update: Update, context: CallbackContext):
-    if not context.user_data.get("demo_mode"):
-        return False
-    if context.user_data.get("demo_waiting_car") is not True:
-        return False
-
-    raw = (update.message.text or "").strip()
-    is_valid, normalized, error = validate_car_number(raw)
-    if not is_valid:
-        await update.message.reply_text(f"❌ В демо не распознал номер: {error}\nПопробуй ещё раз.")
-        return True
-
-    payload = context.user_data.get("demo_payload", {"services": [], "calendar_days": []})
-    payload["car_number"] = normalized
-    payload["services"] = []
-    context.user_data["demo_waiting_car"] = False
-    context.user_data["demo_payload"] = payload
-    await update.message.reply_text(
-        f"✅ Номер распознан: {normalized}\nОткрываю демо-выбор услуг.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧪 Перейти к услугам (демо)", callback_data="demo_step_services")],
-        ]),
-    )
-    return True
 
 
 async def faq_message(update: Update, context: CallbackContext):
@@ -4969,7 +4566,7 @@ async def notify_subscription_events(application: Application):
                     pass
                 DatabaseManager.set_app_content(key, "1")
 
-        if days_left < 0:
+        if days_left <= 0:
             key = f"sub_notice_expired_{row['id']}_{expires_date.isoformat()}"
             if DatabaseManager.get_app_content(key, "") != "1":
                 try:
