@@ -1712,6 +1712,7 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "combo_create_settings": combo_builder_start,
         "admin_panel": admin_panel,
         "admin_users": admin_users,
+        "admin_subscriptions": admin_subscriptions,
         "admin_broadcast_menu": admin_broadcast_menu,
         "admin_broadcast_all": lambda q, c: admin_broadcast_prepare(q, c, "all"),
         "admin_broadcast_expiring_1d": lambda q, c: admin_broadcast_prepare(q, c, "expiring_1d"),
@@ -1836,10 +1837,12 @@ async def handle_callback(update: Update, context: CallbackContext):
         ("shift_repeats_", export_shift_repeats),
         ("combo_builder_toggle_", combo_builder_toggle),
         ("admin_user_", admin_user_card),
+        ("admin_sub_user_", admin_user_card),
         ("admin_toggle_block_", admin_toggle_block),
         ("admin_toggle_leaderboard_", admin_toggle_leaderboard),
         ("admin_activate_month_", admin_activate_month),
         ("admin_activate_days_prompt_", admin_activate_days_prompt),
+        ("admin_disable_subscription_", admin_disable_subscription),
         ("admin_broadcast_user_", lambda q, c, d: admin_broadcast_prepare(q, c, d.replace("admin_broadcast_user_", ""))),
         ("calendar_nav_", calendar_nav_callback),
         ("calendar_day_", calendar_day_callback),
@@ -2077,6 +2080,7 @@ async def admin_panel(query, context):
         return
     keyboard = [
         [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton("💳 Подписки", callback_data="admin_subscriptions")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast_menu")],
         [InlineKeyboardButton("❓ Редактировать FAQ", callback_data="admin_faq_menu")],
         [InlineKeyboardButton("🖼 Медиа разделов", callback_data="admin_media_menu")],
@@ -2090,6 +2094,7 @@ async def admin_panel(query, context):
 async def send_admin_panel_for_message(update: Update):
     keyboard = [
         [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton("💳 Подписки", callback_data="admin_subscriptions")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast_menu")],
         [InlineKeyboardButton("❓ Редактировать FAQ", callback_data="admin_faq_menu")],
         [InlineKeyboardButton("🖼 Медиа разделов", callback_data="admin_media_menu")],
@@ -2110,10 +2115,40 @@ async def admin_users(query, context):
     await query.edit_message_text("👥 Пользователи:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+async def admin_subscriptions(query, context):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    users = DatabaseManager.get_all_users_with_stats()
+    users_sorted = sorted(users, key=lambda u: int(u.get("telegram_id", 0)))
+    keyboard = []
+    for row in users_sorted[:40]:
+        target_user = DatabaseManager.get_user_by_id(int(row["id"]))
+        expires = subscription_expires_at_for_user(target_user) if target_user else None
+        if is_admin_telegram(int(row["telegram_id"])):
+            status = "♾️"
+        elif expires and now_local() <= expires:
+            status = f"✅ до {format_subscription_until(expires)}"
+        else:
+            status = "⛔ истекла"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{row['name']} ({row['telegram_id']}) — {status}",
+                callback_data=f"admin_sub_user_{row['id']}",
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 В админку", callback_data="admin_panel")])
+    await query.edit_message_text("💳 Подписки пользователей:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 async def admin_user_card(query, context, data):
     if not is_admin_telegram(query.from_user.id):
         return
-    user_id = int(data.replace("admin_user_", ""))
+    context.user_data["admin_user_back"] = "admin_users"
+    if data.startswith("admin_sub_user_"):
+        user_id = int(data.replace("admin_sub_user_", ""))
+        context.user_data["admin_user_back"] = "admin_subscriptions"
+    else:
+        user_id = int(data.replace("admin_user_", ""))
     users = {u["id"]: u for u in DatabaseManager.get_all_users_with_stats()}
     row = users.get(user_id)
     if not row:
@@ -2126,6 +2161,7 @@ async def admin_user_card(query, context, data):
     sub_status = "♾️ Админ" if is_admin_telegram(int(row["telegram_id"])) else (
         f"до {format_subscription_until(expires)}" if expires and now_local() <= expires else "истекла"
     )
+    back_callback = context.user_data.get("admin_user_back", "admin_users")
     keyboard = [
         [InlineKeyboardButton("🔓 Открыть доступ" if blocked else "⛔ Закрыть доступ", callback_data=f"admin_toggle_block_{user_id}")],
         [InlineKeyboardButton(
@@ -2134,7 +2170,8 @@ async def admin_user_card(query, context, data):
         )],
         [InlineKeyboardButton("🗓️ Активировать на месяц", callback_data=f"admin_activate_month_{user_id}")],
         [InlineKeyboardButton("✍️ Активировать на N дней", callback_data=f"admin_activate_days_prompt_{user_id}")],
-        [InlineKeyboardButton("🔙 К пользователям", callback_data="admin_users")],
+        [InlineKeyboardButton("🚫 Отключить подписку", callback_data=f"admin_disable_subscription_{user_id}")],
+        [InlineKeyboardButton("🔙 Назад", callback_data=back_callback)],
     ]
     await query.edit_message_text(
         f"👤 {row['name']}\nTelegram ID: {row['telegram_id']}\n"
@@ -2206,6 +2243,30 @@ async def admin_activate_days_prompt(query, context, data):
     await query.edit_message_text(
         "Введите количество дней для активации (например, 45)."
     )
+
+
+async def admin_disable_subscription(query, context, data):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    user_id = int(data.replace("admin_disable_subscription_", ""))
+    target_user = DatabaseManager.get_user_by_id(user_id)
+    if not target_user:
+        await query.answer("Пользователь не найден")
+        return
+    disabled_at = now_local() - timedelta(seconds=1)
+    DatabaseManager.set_subscription_expires_at(user_id, disabled_at.isoformat())
+    await query.answer("Подписка отключена")
+    try:
+        await context.bot.send_message(
+            chat_id=target_user["telegram_id"],
+            text=(
+                "⛔ Ваша подписка отключена администратором.\n"
+                f"Для продления: {SUBSCRIPTION_CONTACT}"
+            )
+        )
+    except Exception:
+        pass
+    await admin_user_card(query, context, f"admin_user_{user_id}")
 
 
 def get_broadcast_recipients(target: str, admin_db_user: dict) -> list[int]:
