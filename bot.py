@@ -5,6 +5,7 @@
 import logging
 import asyncio
 from datetime import datetime, date, timedelta
+from math import ceil
 from zoneinfo import ZoneInfo
 import json
 import os
@@ -12,10 +13,10 @@ import calendar
 import re
 import importlib.util
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.request import urlopen
 from io import BytesIO
 from typing import List
+import csv
+import shutil
 
 from telegram import (
     Update,
@@ -761,43 +762,96 @@ def build_current_shift_dashboard(user_id: int, shift: dict, cars: list[dict], t
     today = now_local().date()
     day_key = today.isoformat()
 
-    today_cars = len([car for car in cars if str(car.get("created_at", "")).startswith(day_key)])
+    today_cars = DatabaseManager.get_user_cars_count_for_date(user_id, day_key)
     today_income = DatabaseManager.get_user_total_for_date(user_id, day_key)
-
-    daily_goal = DatabaseManager.get_daily_goal(user_id) if DatabaseManager.is_goal_enabled(user_id) else 0
-    daily_percent = calculate_percent(today_income, daily_goal) if daily_goal > 0 else 0
-    progress_bar = render_bar(daily_percent, 10)
 
     _, start_d, end_d, _, _ = get_decade_period(today)
     total_days = max((end_d - start_d).days + 1, 1)
-    passed_days = max((today - start_d).days + 1, 1)
+    days_elapsed = max(1, min((today - start_d).days + 1, total_days))
+    remaining_days_including_today = max(1, total_days - (days_elapsed - 1))
 
-    decade_goal = DatabaseManager.get_decade_goal(user_id) if DatabaseManager.is_goal_enabled(user_id) else 0
-    earned_decade = DatabaseManager.get_user_total_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
+    decade_plan_total = DatabaseManager.get_decade_goal(user_id) if DatabaseManager.is_goal_enabled(user_id) else 0
+    decade_earned_total = DatabaseManager.get_user_total_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
+    decade_remaining = max(decade_plan_total - decade_earned_total, 0)
 
-    remaining_days = max(total_days - passed_days, 1)
-    need_per_day = int(max(decade_goal - earned_decade, 0) / remaining_days) if decade_goal > 0 else 0
-    expected_today = int((decade_goal / total_days) * passed_days) if decade_goal > 0 else 0
-    lag_today = earned_decade - expected_today
-    runrate = 0
-    if expected_today > 0:
-        runrate = int(((earned_decade - expected_today) / expected_today) * 100)
+    day_plan = ceil(decade_plan_total / total_days) if decade_plan_total > 0 else 0
+    need_today = ceil(decade_remaining / remaining_days_including_today) if decade_remaining > 0 else 0
 
-    today_line = f"{format_money(today_income)} / {format_money(daily_goal)} план" if daily_goal > 0 else format_money(today_income)
-    decade_line = f"{format_money(earned_decade)} / {format_money(decade_goal)}" if decade_goal > 0 else f"{format_money(earned_decade)} / —"
+    if need_today > 0:
+        today_percent = calculate_percent(today_income, need_today)
+        progress_bar = render_bar(today_percent, 10)
+        runrate_to_need_today = (today_income / need_today) - 1
+        runrate_line = f"⚡ Ранрейт к нужному сегодня: {runrate_to_need_today:+.0%}"
+        today_line = f"{format_money(today_income)} / {format_money(need_today)} нужно сегодня"
+    else:
+        today_percent = 100
+        progress_bar = render_bar(today_percent, 10)
+        runrate_line = "⚡ Ранрейт к нужному сегодня: План закрыт ✅"
+        today_line = f"{format_money(today_income)} / План закрыт ✅"
+
+    planned_by_today = day_plan * days_elapsed
+    delta = decade_earned_total - planned_by_today
+    if delta < 0:
+        delta_line = f"Отставание на текущий день: -{format_money(abs(delta))}"
+    else:
+        delta_line = f"Опережение: +{format_money(delta)}"
 
     return (
         "📅 Сегодня:\n"
         f"Машин: {today_cars}\n"
         f"Доход: {today_line}\n"
-        f"% выполнения: {daily_percent}%\n"
+        f"% выполнения: {today_percent}%\n"
         f"{progress_bar}\n\n"
         "🎯 План декады:\n"
-        f"Всего заработано: {decade_line}\n"
-        f"Нужно в день: {format_money(need_per_day)}\n"
-        f"Отставание на текущий день: {format_money(lag_today)}\n\n"
-        f"⚡ Ранрейт: {runrate:+d}%"
+        f"Всего заработано: {format_money(decade_earned_total)} / {format_money(decade_plan_total)}\n"
+        f"Осталось: {format_money(decade_remaining)}\n"
+        f"Осталось дней (включая сегодня): {remaining_days_including_today}\n"
+        f"Нужно в день, чтобы успеть: {format_money(need_today)}\n"
+        f"Средний план по декаде: {format_money(day_plan)}/день\n"
+        f"{delta_line}\n\n"
+        f"{runrate_line}"
     )
+
+
+def _test_decade_plan_math_cases() -> None:
+    def calc(decade_plan_total: int, decade_earned_total: int, day_earned: int, days_total: int, days_elapsed: int):
+        remaining_days_including_today = max(1, days_total - (days_elapsed - 1))
+        decade_remaining = max(0, decade_plan_total - decade_earned_total)
+        day_plan = ceil(decade_plan_total / days_total) if decade_plan_total > 0 else 0
+        need_today = ceil(decade_remaining / remaining_days_including_today) if decade_remaining > 0 else 0
+        return remaining_days_including_today, decade_remaining, day_plan, need_today
+
+    # Середина декады
+    rem_days, rem, day_plan, need_today = calc(35000, 12000, 2500, 10, 5)
+    assert rem_days == 6 and rem == 23000 and day_plan == 3500 and need_today == 3834
+
+    # Последний день декады
+    rem_days, rem, day_plan, need_today = calc(35000, 22717, 1000, 10, 10)
+    assert rem_days == 1 and rem == 12283 and day_plan == 3500 and need_today == 12283
+
+    # План уже выполнен
+    rem_days, rem, day_plan, need_today = calc(35000, 36000, 500, 10, 8)
+    assert rem == 0 and need_today == 0 and day_plan == 3500
+
+
+def _test_msk_day_rollover_query() -> None:
+    """Проверка: доход после полуночи по МСК должен попадать в новый день."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, telegram_id BIGINT, name TEXT, created_at TEXT)")
+    cur.execute("CREATE TABLE shifts (id INTEGER PRIMARY KEY, user_id INTEGER, start_time TEXT, end_time TEXT, status TEXT)")
+    cur.execute("CREATE TABLE cars (id INTEGER PRIMARY KEY, shift_id INTEGER, car_number TEXT, total_amount INTEGER, created_at TEXT)")
+    cur.execute("INSERT INTO users (id, telegram_id, name, created_at) VALUES (1, 1, 'u', '2026-01-01 00:00:00')")
+    cur.execute("INSERT INTO shifts (id, user_id, start_time, status) VALUES (1, 1, '2026-01-10 22:00:00', 'active')")
+    cur.execute("INSERT INTO cars (id, shift_id, car_number, total_amount, created_at) VALUES (1, 1, 'A001AA', 1000, '2026-01-10 21:30:00')")
+    cur.execute("INSERT INTO cars (id, shift_id, car_number, total_amount, created_at) VALUES (2, 1, 'A002AA', 2000, '2026-01-10 23:30:00')")
+    cur.execute("SELECT COALESCE(SUM(c.total_amount),0) FROM cars c JOIN shifts s ON s.id=c.shift_id WHERE s.user_id=1 AND date(c.created_at, '+3 hours') = date('2026-01-11')")
+    total_next_day = int(cur.fetchone()[0] or 0)
+    conn.close()
+    assert total_next_day == 3000
 
 
 def build_closed_shift_dashboard(shift: dict, cars: list[dict], total: int) -> str:
@@ -1658,6 +1712,7 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "combo_create_settings": combo_builder_start,
         "admin_panel": admin_panel,
         "admin_users": admin_users,
+        "admin_subscriptions": admin_subscriptions,
         "admin_broadcast_menu": admin_broadcast_menu,
         "admin_broadcast_all": lambda q, c: admin_broadcast_prepare(q, c, "all"),
         "admin_broadcast_expiring_1d": lambda q, c: admin_broadcast_prepare(q, c, "expiring_1d"),
@@ -1782,10 +1837,12 @@ async def handle_callback(update: Update, context: CallbackContext):
         ("shift_repeats_", export_shift_repeats),
         ("combo_builder_toggle_", combo_builder_toggle),
         ("admin_user_", admin_user_card),
+        ("admin_sub_user_", admin_user_card),
         ("admin_toggle_block_", admin_toggle_block),
         ("admin_toggle_leaderboard_", admin_toggle_leaderboard),
         ("admin_activate_month_", admin_activate_month),
         ("admin_activate_days_prompt_", admin_activate_days_prompt),
+        ("admin_disable_subscription_", admin_disable_subscription),
         ("admin_broadcast_user_", lambda q, c, d: admin_broadcast_prepare(q, c, d.replace("admin_broadcast_user_", ""))),
         ("calendar_nav_", calendar_nav_callback),
         ("calendar_day_", calendar_day_callback),
@@ -2023,6 +2080,7 @@ async def admin_panel(query, context):
         return
     keyboard = [
         [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton("💳 Подписки", callback_data="admin_subscriptions")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast_menu")],
         [InlineKeyboardButton("❓ Редактировать FAQ", callback_data="admin_faq_menu")],
         [InlineKeyboardButton("🖼 Медиа разделов", callback_data="admin_media_menu")],
@@ -2036,6 +2094,7 @@ async def admin_panel(query, context):
 async def send_admin_panel_for_message(update: Update):
     keyboard = [
         [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton("💳 Подписки", callback_data="admin_subscriptions")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast_menu")],
         [InlineKeyboardButton("❓ Редактировать FAQ", callback_data="admin_faq_menu")],
         [InlineKeyboardButton("🖼 Медиа разделов", callback_data="admin_media_menu")],
@@ -2056,10 +2115,40 @@ async def admin_users(query, context):
     await query.edit_message_text("👥 Пользователи:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+async def admin_subscriptions(query, context):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    users = DatabaseManager.get_all_users_with_stats()
+    users_sorted = sorted(users, key=lambda u: int(u.get("telegram_id", 0)))
+    keyboard = []
+    for row in users_sorted[:40]:
+        target_user = DatabaseManager.get_user_by_id(int(row["id"]))
+        expires = subscription_expires_at_for_user(target_user) if target_user else None
+        if is_admin_telegram(int(row["telegram_id"])):
+            status = "♾️"
+        elif expires and now_local() <= expires:
+            status = f"✅ до {format_subscription_until(expires)}"
+        else:
+            status = "⛔ истекла"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{row['name']} ({row['telegram_id']}) — {status}",
+                callback_data=f"admin_sub_user_{row['id']}",
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 В админку", callback_data="admin_panel")])
+    await query.edit_message_text("💳 Подписки пользователей:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 async def admin_user_card(query, context, data):
     if not is_admin_telegram(query.from_user.id):
         return
-    user_id = int(data.replace("admin_user_", ""))
+    context.user_data["admin_user_back"] = "admin_users"
+    if data.startswith("admin_sub_user_"):
+        user_id = int(data.replace("admin_sub_user_", ""))
+        context.user_data["admin_user_back"] = "admin_subscriptions"
+    else:
+        user_id = int(data.replace("admin_user_", ""))
     users = {u["id"]: u for u in DatabaseManager.get_all_users_with_stats()}
     row = users.get(user_id)
     if not row:
@@ -2072,6 +2161,7 @@ async def admin_user_card(query, context, data):
     sub_status = "♾️ Админ" if is_admin_telegram(int(row["telegram_id"])) else (
         f"до {format_subscription_until(expires)}" if expires and now_local() <= expires else "истекла"
     )
+    back_callback = context.user_data.get("admin_user_back", "admin_users")
     keyboard = [
         [InlineKeyboardButton("🔓 Открыть доступ" if blocked else "⛔ Закрыть доступ", callback_data=f"admin_toggle_block_{user_id}")],
         [InlineKeyboardButton(
@@ -2080,7 +2170,8 @@ async def admin_user_card(query, context, data):
         )],
         [InlineKeyboardButton("🗓️ Активировать на месяц", callback_data=f"admin_activate_month_{user_id}")],
         [InlineKeyboardButton("✍️ Активировать на N дней", callback_data=f"admin_activate_days_prompt_{user_id}")],
-        [InlineKeyboardButton("🔙 К пользователям", callback_data="admin_users")],
+        [InlineKeyboardButton("🚫 Отключить подписку", callback_data=f"admin_disable_subscription_{user_id}")],
+        [InlineKeyboardButton("🔙 Назад", callback_data=back_callback)],
     ]
     await query.edit_message_text(
         f"👤 {row['name']}\nTelegram ID: {row['telegram_id']}\n"
@@ -2152,6 +2243,30 @@ async def admin_activate_days_prompt(query, context, data):
     await query.edit_message_text(
         "Введите количество дней для активации (например, 45)."
     )
+
+
+async def admin_disable_subscription(query, context, data):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    user_id = int(data.replace("admin_disable_subscription_", ""))
+    target_user = DatabaseManager.get_user_by_id(user_id)
+    if not target_user:
+        await query.answer("Пользователь не найден")
+        return
+    disabled_at = now_local() - timedelta(seconds=1)
+    DatabaseManager.set_subscription_expires_at(user_id, disabled_at.isoformat())
+    await query.answer("Подписка отключена")
+    try:
+        await context.bot.send_message(
+            chat_id=target_user["telegram_id"],
+            text=(
+                "⛔ Ваша подписка отключена администратором.\n"
+                f"Для продления: {SUBSCRIPTION_CONTACT}"
+            )
+        )
+    except Exception:
+        pass
+    await admin_user_card(query, context, f"admin_user_{user_id}")
 
 
 def get_broadcast_recipients(target: str, admin_db_user: dict) -> list[int]:
@@ -2832,10 +2947,6 @@ async def send_faq(chat_target, context: CallbackContext):
 
 
 async def faq_message(update: Update, context: CallbackContext):
-    has_active = False
-    db_user = DatabaseManager.get_user(update.effective_user.id)
-    if db_user:
-        has_active = DatabaseManager.get_active_shift(db_user['id']) is not None
     await send_faq(update.message, context)
 
 
@@ -3841,7 +3952,7 @@ async def calendar_rebase_callback(query, context):
 
 
 def build_leaderboard_text(decade_title: str, decade_leaders: list[dict]) -> str:
-    header = [f"🏆 Топ героев", f"📆 Декада: {decade_title}"]
+    header = ["🏆 Топ героев", f"📆 Декада: {decade_title}"]
     if not decade_leaders:
         return "\n".join(header + ["Пока нет данных за декаду"])
     lines = []
@@ -3907,8 +4018,6 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
 
     title_font = _load_rank_font(ImageFont, 48)
     sec_font = _load_rank_font(ImageFont, 24)
-    card_font = _load_rank_font(ImageFont, 28)
-    amount_font = _load_rank_font(ImageFont, 32)
     small_font = _load_rank_font(ImageFont, 20)
 
     def _rounded_card(x1, y1, x2, y2, fill=(17, 27, 50, 170), outline=(120, 146, 198, 80), r=24):
@@ -4379,18 +4488,6 @@ async def decade_message(update: Update, context: CallbackContext):
     await update.message.reply_text(
         message,
         parse_mode="HTML",
-        reply_markup=create_main_reply_keyboard(True)
-    )
-
-async def stats_message(update: Update, context: CallbackContext):
-    user = update.effective_user
-    db_user = DatabaseManager.get_user(user.id)
-    if not db_user:
-        await update.message.reply_text("❌ Ошибка: пользователь не найден")
-        return
-    message = build_stats_summary(db_user['id'])
-    await update.message.reply_text(
-        message,
         reply_markup=create_main_reply_keyboard(True)
     )
 

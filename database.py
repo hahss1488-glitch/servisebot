@@ -408,7 +408,22 @@ class DatabaseManager:
             """SELECT COALESCE(SUM(c.total_amount), 0)
             FROM cars c
             JOIN shifts s ON s.id = c.shift_id
-            WHERE s.user_id = ? AND date(c.created_at, 'localtime') = date(?)""",
+            WHERE s.user_id = ? AND date(c.created_at, '+3 hours') = date(?)""",
+            (user_id, date_str)
+        )
+        row = cur.fetchone()
+        conn.close()
+        return int(row[0] or 0) if row else 0
+
+    @staticmethod
+    def get_user_cars_count_for_date(user_id: int, date_str: str) -> int:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT COUNT(c.id)
+            FROM cars c
+            JOIN shifts s ON s.id = c.shift_id
+            WHERE s.user_id = ? AND date(c.created_at, '+3 hours') = date(?)""",
             (user_id, date_str)
         )
         row = cur.fetchone()
@@ -445,7 +460,10 @@ class DatabaseManager:
         elif decade_index == 2:
             start_day, end_day = 11, 20
         else:
-            start_day, end_day = 21, 31
+            start_day, end_day = 21, calendar.monthrange(year, month)[1]
+
+        start_date = f"{year:04d}-{month:02d}-{start_day:02d}"
+        end_date = f"{year:04d}-{month:02d}-{end_day:02d}"
 
         conn = get_connection()
         cur = conn.cursor()
@@ -459,13 +477,11 @@ class DatabaseManager:
             LEFT JOIN user_settings us ON us.user_id = u.id
             WHERE COALESCE(us.is_blocked, 0) = 0
               AND COALESCE(us.include_in_leaderboard, 1) = 1
-              AND CAST(strftime('%Y', s.start_time) AS INTEGER) = ?
-              AND CAST(strftime('%m', s.start_time) AS INTEGER) = ?
-              AND CAST(strftime('%d', s.start_time) AS INTEGER) BETWEEN ? AND ?
+              AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)
             GROUP BY u.id
             ORDER BY total_amount DESC
             LIMIT ?""",
-            (year, month, start_day, end_day, limit)
+            (start_date, end_date, limit)
         )
         rows = cur.fetchall()
         conn.close()
@@ -501,7 +517,7 @@ class DatabaseManager:
             """SELECT COALESCE(SUM(c.total_amount), 0)
             FROM shifts s
             LEFT JOIN cars c ON s.id = c.shift_id
-            WHERE s.user_id = ? AND date(s.start_time) BETWEEN date(?) AND date(?)""",
+            WHERE s.user_id = ? AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)""",
             (user_id, start_date, end_date)
         )
         row = cur.fetchone()
@@ -755,7 +771,7 @@ class DatabaseManager:
             """SELECT c.id, c.car_number, c.total_amount, c.shift_id, c.created_at
             FROM cars c
             JOIN shifts s ON s.id = c.shift_id
-            WHERE s.user_id = ? AND date(c.created_at, 'localtime') = date(?)
+            WHERE s.user_id = ? AND date(c.created_at, '+3 hours') = date(?)
             ORDER BY c.created_at""",
             (user_id, day)
         )
@@ -792,7 +808,7 @@ class DatabaseManager:
             """SELECT c.id
             FROM cars c
             JOIN shifts s ON s.id = c.shift_id
-            WHERE s.user_id = ? AND date(s.start_time) = date(?)""",
+            WHERE s.user_id = ? AND date(c.created_at, '+3 hours') = date(?)""",
             (user_id, day)
         )
         car_ids = [row[0] for row in cur.fetchall()]
@@ -809,11 +825,11 @@ class DatabaseManager:
         cur = conn.cursor()
         cur.execute(
             """SELECT
-            CAST(strftime('%Y', s.start_time) AS INTEGER) as year,
-            CAST(strftime('%m', s.start_time) AS INTEGER) as month,
+            CAST(strftime('%Y', date(c.created_at, '+3 hours')) AS INTEGER) as year,
+            CAST(strftime('%m', date(c.created_at, '+3 hours')) AS INTEGER) as month,
             CASE
-                WHEN CAST(strftime('%d', s.start_time) AS INTEGER) <= 10 THEN 1
-                WHEN CAST(strftime('%d', s.start_time) AS INTEGER) <= 20 THEN 2
+                WHEN CAST(strftime('%d', date(c.created_at, '+3 hours')) AS INTEGER) <= 10 THEN 1
+                WHEN CAST(strftime('%d', date(c.created_at, '+3 hours')) AS INTEGER) <= 20 THEN 2
                 ELSE 3
             END as decade_index,
             COUNT(c.id) as cars_count,
@@ -848,13 +864,13 @@ class DatabaseManager:
         end_date = f"{year:04d}-{month:02d}-{end_day:02d}"
 
         cur.execute(
-            """SELECT date(s.start_time) as day,
+            """SELECT date(c.created_at, '+3 hours') as day,
             COUNT(c.id) as cars_count,
             COALESCE(SUM(c.total_amount), 0) as total_amount
             FROM shifts s
-            LEFT JOIN cars c ON c.shift_id = s.id
+            JOIN cars c ON c.shift_id = s.id
             WHERE s.user_id = ?
-              AND date(s.start_time) BETWEEN date(?) AND date(?)
+              AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)
             GROUP BY day
             ORDER BY day""",
             (user_id, start_date, end_date)
@@ -1236,7 +1252,8 @@ class DatabaseManager:
             WHERE s.user_id = ? AND date(s.start_time) BETWEEN date(?) AND date(?)""",
             (user_id, start_date, end_date)
         )
-        row = cur.fetchone(); conn.close()
+        row = cur.fetchone()
+        conn.close()
         return int(row[0] or 0) if row else 0
 
     @staticmethod
@@ -1250,12 +1267,14 @@ class DatabaseManager:
             WHERE s.user_id = ? AND date(s.start_time) BETWEEN date(?) AND date(?)""",
             (user_id, start_date, end_date)
         )
-        row = cur.fetchone(); conn.close()
+        row = cur.fetchone()
+        conn.close()
         return int(row[0] or 0) if row else 0
 
     @staticmethod
     def get_shift_repeated_services(shift_id: int) -> List[Dict]:
-        conn = get_connection(); cur = conn.cursor()
+        conn = get_connection()
+        cur = conn.cursor()
         cur.execute(
             """SELECT c.id as car_id, c.car_number, cs.service_name, SUM(cs.quantity) as total_count
             FROM cars c JOIN car_services cs ON cs.car_id = c.id
@@ -1265,40 +1284,49 @@ class DatabaseManager:
             ORDER BY c.created_at ASC, total_count DESC""",
             (shift_id,)
         )
-        rows=cur.fetchall(); conn.close(); return [dict(r) for r in rows]
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
 
     @staticmethod
     def get_days_for_month(user_id: int, year_month: str) -> List[Dict]:
-        conn=get_connection(); cur=conn.cursor()
+        conn = get_connection()
+        cur = conn.cursor()
         cur.execute(
-            """SELECT date(s.start_time) as day,
+            """SELECT date(c.created_at, '+3 hours') as day,
             COUNT(DISTINCT s.id) as shifts_count,
             COALESCE(SUM(c.total_amount),0) as total_amount
             FROM shifts s
-            LEFT JOIN cars c ON c.shift_id = s.id
-            WHERE s.user_id = ? AND strftime('%Y-%m', s.start_time) = ?
-            GROUP BY date(s.start_time)
+            JOIN cars c ON c.shift_id = s.id
+            WHERE s.user_id = ? AND strftime('%Y-%m', date(c.created_at, '+3 hours')) = ?
+            GROUP BY date(c.created_at, '+3 hours')
             ORDER BY day""",
             (user_id, year_month)
         )
-        rows=cur.fetchall(); conn.close(); return [dict(r) for r in rows]
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
 
     @staticmethod
     def get_app_content(key: str, default: str = "") -> str:
-        conn=get_connection(); cur=conn.cursor()
+        conn = get_connection()
+        cur = conn.cursor()
         cur.execute("SELECT value FROM app_content WHERE key = ?", (key,))
-        row=cur.fetchone(); conn.close()
+        row = cur.fetchone()
+        conn.close()
         return str(row["value"]) if row and row["value"] is not None else default
 
     @staticmethod
     def set_app_content(key: str, value: str) -> None:
-        conn=get_connection(); cur=conn.cursor()
+        conn = get_connection()
+        cur = conn.cursor()
         cur.execute(
             """INSERT INTO app_content (key, value) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
             (key, value)
         )
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
 
 
 if __name__ == "__main__":
