@@ -1846,6 +1846,8 @@ async def handle_callback(update: Update, context: CallbackContext):
         ("admin_broadcast_user_", lambda q, c, d: admin_broadcast_prepare(q, c, d.replace("admin_broadcast_user_", ""))),
         ("calendar_nav_", calendar_nav_callback),
         ("calendar_day_", calendar_day_callback),
+        ("calendar_set_", calendar_set_day_type_callback),
+        ("calendar_back_month_", calendar_back_month_callback),
         ("calendar_setup_pick_", calendar_setup_pick_callback),
         ("calendar_setup_save_", calendar_setup_save_callback),
         ("calendar_edit_toggle_", calendar_edit_toggle_callback),
@@ -2640,32 +2642,7 @@ async def calendar_day_callback(query, context, data):
     day = data.replace("calendar_day_", "")
 
     if context.user_data.get("calendar_edit_mode", False):
-        target = parse_iso_date(day)
-        if target:
-            overrides = DatabaseManager.get_calendar_overrides(db_user["id"])
-            base_type = get_work_day_type(db_user, target, {})
-            current_override = overrides.get(day)
-            if base_type == "planned":
-                DatabaseManager.set_calendar_override(db_user["id"], day, "" if current_override == "off" else "off")
-            else:
-                DatabaseManager.set_calendar_override(db_user["id"], day, "" if current_override == "extra" else "extra")
-
-        year, month = context.user_data.get("calendar_month", (now_local().year, now_local().month))
-        if DatabaseManager.is_goal_enabled(db_user["id"]):
-            daily_goal = calculate_current_decade_daily_goal(db_user)
-            DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
-            await send_goal_status(None, context, db_user["id"], source_message=query.message)
-        await query.edit_message_text(
-            build_work_calendar_text(db_user, year, month, setup_mode=False, edit_mode=True),
-            reply_markup=build_work_calendar_keyboard(
-                db_user,
-                year,
-                month,
-                setup_mode=False,
-                setup_selected=[],
-                edit_mode=True,
-            )
-        )
+        await render_calendar_day_card(query, context, db_user, day)
         return
 
     await query.answer("Редактирование доступно только в режиме редактирования")
