@@ -418,7 +418,9 @@ def build_work_calendar_keyboard(db_user: dict, year: int, month: int, setup_mod
                 continue
 
             day_type = get_work_day_type(db_user, current_day, overrides)
-            if day_key in shifts_days and day_type == "off":
+            # Если есть факт смены, но пользователь НЕ ставил явный off,
+            # показываем как доп. смену. Явный ручной off имеет приоритет.
+            if day_key in shifts_days and day_type == "off" and overrides.get(day_key) != "off":
                 day_type = "extra"
             prefix = "🔴" if day_type == "planned" else ("🟡" if day_type == "extra" else "⚪")
             row.append(InlineKeyboardButton(f"{prefix}{day:02d}", callback_data=f"calendar_day_{day_key}"))
@@ -2565,11 +2567,14 @@ async def render_calendar_day_card(query, context, db_user: dict, day: str):
         return
 
     day_type = get_work_day_type(db_user, target)
+    overrides = DatabaseManager.get_calendar_overrides(db_user["id"])
+    current_override = overrides.get(day)
 
     month_key = day[:7]
     month_days = DatabaseManager.get_days_for_month(db_user["id"], month_key)
     has_day = any(row.get("day") == day and int(row.get("shifts_count", 0)) > 0 for row in month_days)
-    if has_day and day_type == "off":
+    # Факт смены превращает день в "доп. смену" только если нет ручного off.
+    if has_day and day_type == "off" and current_override != "off":
         day_type = "extra"
 
     day_type_text = {
