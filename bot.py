@@ -5,6 +5,7 @@
 import logging
 import asyncio
 from datetime import datetime, date, timedelta
+from math import ceil
 from zoneinfo import ZoneInfo
 import json
 import os
@@ -12,10 +13,10 @@ import calendar
 import re
 import importlib.util
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.request import urlopen
 from io import BytesIO
 from typing import List
+import csv
+import shutil
 
 from telegram import (
     Update,
@@ -25,6 +26,7 @@ from telegram import (
     KeyboardButton,
     InputMediaPhoto,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -40,7 +42,6 @@ from exports import create_decade_pdf, create_decade_xlsx, create_month_xlsx
 from leaderboard.avatars import get_avatar_image as get_avatar_image_async
 from services.status import send_status, edit_status, done_status
 from ui.texts import STATUS_LEADERBOARD
-from ui.keyboards import onboarding_start_keyboard, onboarding_exit_keyboard
 from ui.nav import push_screen, pop_screen, get_current_screen, Screen
 
 # Настройка логирования
@@ -316,7 +317,7 @@ def is_allowed_when_expired_menu(text: str) -> bool:
 
 
 def is_allowed_when_expired_callback(data: str) -> bool:
-    return data in {"subscription_info", "account_info", "back"}
+    return data in {"subscription_info", "subscription_info_photo", "account_info", "back"}
 
 
 def activate_subscription_days(user_id: int, days: int) -> datetime:
@@ -762,43 +763,96 @@ def build_current_shift_dashboard(user_id: int, shift: dict, cars: list[dict], t
     today = now_local().date()
     day_key = today.isoformat()
 
-    today_cars = len([car for car in cars if str(car.get("created_at", "")).startswith(day_key)])
+    today_cars = DatabaseManager.get_user_cars_count_for_date(user_id, day_key)
     today_income = DatabaseManager.get_user_total_for_date(user_id, day_key)
-
-    daily_goal = DatabaseManager.get_daily_goal(user_id) if DatabaseManager.is_goal_enabled(user_id) else 0
-    daily_percent = calculate_percent(today_income, daily_goal) if daily_goal > 0 else 0
-    progress_bar = render_bar(daily_percent, 10)
 
     _, start_d, end_d, _, _ = get_decade_period(today)
     total_days = max((end_d - start_d).days + 1, 1)
-    passed_days = max((today - start_d).days + 1, 1)
+    days_elapsed = max(1, min((today - start_d).days + 1, total_days))
+    remaining_days_including_today = max(1, total_days - (days_elapsed - 1))
 
-    decade_goal = DatabaseManager.get_decade_goal(user_id) if DatabaseManager.is_goal_enabled(user_id) else 0
-    earned_decade = DatabaseManager.get_user_total_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
+    decade_plan_total = DatabaseManager.get_decade_goal(user_id) if DatabaseManager.is_goal_enabled(user_id) else 0
+    decade_earned_total = DatabaseManager.get_user_total_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
+    decade_remaining = max(decade_plan_total - decade_earned_total, 0)
 
-    remaining_days = max(total_days - passed_days, 1)
-    need_per_day = int(max(decade_goal - earned_decade, 0) / remaining_days) if decade_goal > 0 else 0
-    expected_today = int((decade_goal / total_days) * passed_days) if decade_goal > 0 else 0
-    lag_today = earned_decade - expected_today
-    runrate = 0
-    if expected_today > 0:
-        runrate = int(((earned_decade - expected_today) / expected_today) * 100)
+    day_plan = ceil(decade_plan_total / total_days) if decade_plan_total > 0 else 0
+    need_today = ceil(decade_remaining / remaining_days_including_today) if decade_remaining > 0 else 0
 
-    today_line = f"{format_money(today_income)} / {format_money(daily_goal)} план" if daily_goal > 0 else format_money(today_income)
-    decade_line = f"{format_money(earned_decade)} / {format_money(decade_goal)}" if decade_goal > 0 else f"{format_money(earned_decade)} / —"
+    if need_today > 0:
+        today_percent = calculate_percent(today_income, need_today)
+        progress_bar = render_bar(today_percent, 10)
+        runrate_to_need_today = (today_income / need_today) - 1
+        runrate_line = f"⚡ Ранрейт к нужному сегодня: {runrate_to_need_today:+.0%}"
+        today_line = f"{format_money(today_income)} / {format_money(need_today)} нужно сегодня"
+    else:
+        today_percent = 100
+        progress_bar = render_bar(today_percent, 10)
+        runrate_line = "⚡ Ранрейт к нужному сегодня: План закрыт ✅"
+        today_line = f"{format_money(today_income)} / План закрыт ✅"
+
+    planned_by_today = day_plan * days_elapsed
+    delta = decade_earned_total - planned_by_today
+    if delta < 0:
+        delta_line = f"Отставание на текущий день: -{format_money(abs(delta))}"
+    else:
+        delta_line = f"Опережение: +{format_money(delta)}"
 
     return (
         "📅 Сегодня:\n"
         f"Машин: {today_cars}\n"
         f"Доход: {today_line}\n"
-        f"% выполнения: {daily_percent}%\n"
+        f"% выполнения: {today_percent}%\n"
         f"{progress_bar}\n\n"
         "🎯 План декады:\n"
-        f"Всего заработано: {decade_line}\n"
-        f"Нужно в день: {format_money(need_per_day)}\n"
-        f"Отставание на текущий день: {format_money(lag_today)}\n\n"
-        f"⚡ Ранрейт: {runrate:+d}%"
+        f"Всего заработано: {format_money(decade_earned_total)} / {format_money(decade_plan_total)}\n"
+        f"Осталось: {format_money(decade_remaining)}\n"
+        f"Осталось дней (включая сегодня): {remaining_days_including_today}\n"
+        f"Нужно в день, чтобы успеть: {format_money(need_today)}\n"
+        f"Средний план по декаде: {format_money(day_plan)}/день\n"
+        f"{delta_line}\n\n"
+        f"{runrate_line}"
     )
+
+
+def _test_decade_plan_math_cases() -> None:
+    def calc(decade_plan_total: int, decade_earned_total: int, day_earned: int, days_total: int, days_elapsed: int):
+        remaining_days_including_today = max(1, days_total - (days_elapsed - 1))
+        decade_remaining = max(0, decade_plan_total - decade_earned_total)
+        day_plan = ceil(decade_plan_total / days_total) if decade_plan_total > 0 else 0
+        need_today = ceil(decade_remaining / remaining_days_including_today) if decade_remaining > 0 else 0
+        return remaining_days_including_today, decade_remaining, day_plan, need_today
+
+    # Середина декады
+    rem_days, rem, day_plan, need_today = calc(35000, 12000, 2500, 10, 5)
+    assert rem_days == 6 and rem == 23000 and day_plan == 3500 and need_today == 3834
+
+    # Последний день декады
+    rem_days, rem, day_plan, need_today = calc(35000, 22717, 1000, 10, 10)
+    assert rem_days == 1 and rem == 12283 and day_plan == 3500 and need_today == 12283
+
+    # План уже выполнен
+    rem_days, rem, day_plan, need_today = calc(35000, 36000, 500, 10, 8)
+    assert rem == 0 and need_today == 0 and day_plan == 3500
+
+
+def _test_msk_day_rollover_query() -> None:
+    """Проверка: доход после полуночи по МСК должен попадать в новый день."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, telegram_id BIGINT, name TEXT, created_at TEXT)")
+    cur.execute("CREATE TABLE shifts (id INTEGER PRIMARY KEY, user_id INTEGER, start_time TEXT, end_time TEXT, status TEXT)")
+    cur.execute("CREATE TABLE cars (id INTEGER PRIMARY KEY, shift_id INTEGER, car_number TEXT, total_amount INTEGER, created_at TEXT)")
+    cur.execute("INSERT INTO users (id, telegram_id, name, created_at) VALUES (1, 1, 'u', '2026-01-01 00:00:00')")
+    cur.execute("INSERT INTO shifts (id, user_id, start_time, status) VALUES (1, 1, '2026-01-10 22:00:00', 'active')")
+    cur.execute("INSERT INTO cars (id, shift_id, car_number, total_amount, created_at) VALUES (1, 1, 'A001AA', 1000, '2026-01-10 21:30:00')")
+    cur.execute("INSERT INTO cars (id, shift_id, car_number, total_amount, created_at) VALUES (2, 1, 'A002AA', 2000, '2026-01-10 23:30:00')")
+    cur.execute("SELECT COALESCE(SUM(c.total_amount),0) FROM cars c JOIN shifts s ON s.id=c.shift_id WHERE s.user_id=1 AND date(c.created_at, '+3 hours') = date('2026-01-11')")
+    total_next_day = int(cur.fetchone()[0] or 0)
+    conn.close()
+    assert total_next_day == 3000
 
 
 def build_closed_shift_dashboard(shift: dict, cars: list[dict], total: int) -> str:
@@ -1116,10 +1170,6 @@ async def start_command(update: Update, context: CallbackContext):
             f"Версия: {APP_VERSION}",
             reply_markup=create_main_reply_keyboard(has_active, subscription_active)
         )
-        await update.message.reply_text(
-            "Хочешь пройти быстрый тур? Он покажет базовый процесс работы за 1 минуту.",
-            reply_markup=onboarding_start_keyboard(),
-        )
         await send_goal_status(update, context, db_user['id'])
         await send_period_reports_for_user(context.application, db_user)
 
@@ -1218,8 +1268,8 @@ async def nav_tools_callback(query, context):
 
 async def nav_help_callback(query, context):
     await query.edit_message_text(
-        "🎓 Центр обучения\n\n"
-        "Здесь можно пройти интерактивный обзор всех ключевых функций.",
+        "❓ FAQ\n\n"
+        "Выбери раздел с ответами и гайдами по работе с ботом.",
         reply_markup=create_faq_topics_keyboard(get_faq_topics(), is_admin=is_admin_telegram(query.from_user.id)),
     )
 
@@ -1266,9 +1316,6 @@ async def handle_message(update: Update, context: CallbackContext):
     db_user_for_access, blocked, subscription_active = resolve_user_access(user.id, context)
     if blocked:
         await update.message.reply_text("⛔ Доступ к боту закрыт администратором.")
-        return
-
-    if await demo_handle_car_text(update, context):
         return
 
     # Быстрый ввод: "номер + сокращения услуг"
@@ -1666,6 +1713,7 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "combo_create_settings": combo_builder_start,
         "admin_panel": admin_panel,
         "admin_users": admin_users,
+        "admin_subscriptions": admin_subscriptions,
         "admin_broadcast_menu": admin_broadcast_menu,
         "admin_broadcast_all": lambda q, c: admin_broadcast_prepare(q, c, "all"),
         "admin_broadcast_expiring_1d": lambda q, c: admin_broadcast_prepare(q, c, "expiring_1d"),
@@ -1683,25 +1731,6 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "account_info": account_info_callback,
         "show_price": show_price_callback,
         "calendar_open": calendar_callback,
-        "faq_overview": faq_overview_callback,
-        "faq_start_demo": demo_start,
-        "demo_step_shift": demo_step_shift_callback,
-        "demo_step_services": lambda q, c: demo_render_card(q, c, "services"),
-        "demo_step_services_adv": lambda q, c: demo_render_card(q, c, "services_adv"),
-        "demo_step_calendar": lambda q, c: demo_render_card(q, c, "calendar"),
-        "demo_step_leaderboard": lambda q, c: demo_render_card(q, c, "leaderboard"),
-        "demo_step_done": lambda q, c: demo_render_card(q, c, "done"),
-        "demo_exit": demo_exit_callback,
-        "onb:start": onboarding_start,
-        "onb:skip": onboarding_skip,
-        "onb:exit": onboarding_exit,
-        "onb:step_shift": onboarding_step_shift,
-        "onb:step_car": onboarding_step_car,
-        "onb:step_services": onboarding_step_services,
-        "onb:save_services": onboarding_save_services,
-        "onb:step_dashboard": onboarding_step_dashboard,
-        "onb:step_top": onboarding_step_top,
-        "onb:finish": onboarding_finish,
         "nav:back": nav_back_callback,
         "admin_faq_menu": admin_faq_menu,
         "admin_media_menu": admin_media_menu,
@@ -1731,19 +1760,6 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
     return True
 
 
-async def demo_step_shift_callback(query, context):
-    context.user_data["demo_mode"] = True
-    context.user_data["demo_waiting_car"] = True
-    await demo_render_card(query, context, "shift")
-
-
-async def demo_exit_callback(query, context):
-    context.user_data.pop("demo_mode", None)
-    context.user_data.pop("demo_waiting_car", None)
-    context.user_data.pop("demo_payload", None)
-    await query.edit_message_text("Демо завершено. Нажми ❓ FAQ, чтобы пройти снова.")
-
-
 async def nav_back_callback(query, context):
     pop_screen(context)
     prev = get_current_screen(context)
@@ -1754,155 +1770,7 @@ async def nav_back_callback(query, context):
         await query.message.reply_text("Выбери действие:", reply_markup=create_main_reply_keyboard(has_active))
         return
 
-    name = prev.name
-    if name == "onboarding_start":
-        await onboarding_start(query, context)
-    elif name == "onboarding_shift":
-        await onboarding_step_shift(query, context)
-    elif name == "onboarding_car":
-        await onboarding_step_car(query, context)
-    elif name == "onboarding_services":
-        await onboarding_step_services(query, context)
-    elif name == "onboarding_dashboard":
-        await onboarding_step_dashboard(query, context)
-    else:
-        await query.edit_message_text("Главное меню уже внизу 👇")
-
-
-def _onb_state(context):
-    return context.user_data.setdefault("onboarding_state", {"mode": "demo", "services": [], "cars": 0, "amount": 0})
-
-
-async def onboarding_start(query, context):
-    push_screen(context, Screen(name="onboarding_start", kind="inline"))
-    st = _onb_state(context)
-    st["mode"] = "demo"
-    st["services"] = []
-    st["cars"] = 0
-    st["amount"] = 0
-    await query.edit_message_text(
-        "🚀 Быстрый тур\n\n"
-        "Шаг 1/4: Открываем смену в демо-режиме (реальные данные не изменяются).",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Открыть смену (демо)", callback_data="onb:step_shift")],
-            [InlineKeyboardButton("✖️ Выйти из тура", callback_data="onb:exit")],
-        ])
-    )
-
-
-async def onboarding_skip(query, context):
-    await query.edit_message_text("Окей, пропускаем тур. Можешь начать работу с меню ниже 👇")
-
-
-async def onboarding_exit(query, context):
-    context.user_data.pop("onboarding_state", None)
-    await query.edit_message_text("Тур завершён. В любой момент можно запустить снова из FAQ.")
-
-
-async def onboarding_step_shift(query, context):
-    push_screen(context, Screen(name="onboarding_shift", kind="inline"))
-    await query.edit_message_text(
-        "✅ Шаг 1/4: Смена в демо открыта.\n\n"
-        "Теперь добавим машину.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Добавить машину (демо)", callback_data="onb:step_car")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="nav:back")],
-            [InlineKeyboardButton("✖️ Выйти из тура", callback_data="onb:exit")],
-        ])
-    )
-
-
-async def onboarding_step_car(query, context):
-    push_screen(context, Screen(name="onboarding_car", kind="inline"))
-    st = _onb_state(context)
-    st["cars"] = 1
-    await query.edit_message_text(
-        "🚗 Шаг 2/4: Машина добавлена в демо.\n\n"
-        "Выбери 2-3 услуги как в реальном процессе.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧼 Проверка", callback_data="onb:svc_1"), InlineKeyboardButton("⛽ Заправка", callback_data="onb:svc_2")],
-            [InlineKeyboardButton("🧴 Омывайка", callback_data="onb:svc_3"), InlineKeyboardButton("🅿️ Перепарковка", callback_data="onb:svc_14")],
-            [InlineKeyboardButton("💾 Сохранить (демо)", callback_data="onb:save_services")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="nav:back")],
-            [InlineKeyboardButton("✖️ Выйти из тура", callback_data="onb:exit")],
-        ])
-    )
-
-
-async def onboarding_step_services(query, context):
-    st = _onb_state(context)
-    selected = st.get("services", [])
-    amount = sum(get_current_price(sid, "day") for sid in selected)
-    st["amount"] = amount
-    await query.edit_message_text(
-        f"🧾 Шаг 2/4: Услуги выбраны.\nВыбрано: {len(selected)}\nСумма: {format_money(amount)}",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💾 Сохранить (демо)", callback_data="onb:save_services")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="nav:back")],
-            [InlineKeyboardButton("✖️ Выйти из тура", callback_data="onb:exit")],
-        ])
-    )
-
-
-async def onboarding_toggle_service(query, context, data):
-    sid = int(data.replace("onb:svc_", ""))
-    st = _onb_state(context)
-    selected = st.get("services", [])
-    if sid in selected:
-        selected.remove(sid)
-    else:
-        selected.append(sid)
-    st["services"] = selected
-    context.user_data["onboarding_state"] = st
-    await onboarding_step_services(query, context)
-
-
-async def onboarding_save_services(query, context):
-    push_screen(context, Screen(name="onboarding_services", kind="inline"))
-    await onboarding_step_dashboard(query, context)
-
-
-async def onboarding_step_dashboard(query, context):
-    push_screen(context, Screen(name="onboarding_dashboard", kind="inline"))
-    st = _onb_state(context)
-    cars = st.get("cars", 1)
-    total = st.get("amount", 0)
-    avg = int(total / max(cars, 1))
-    await query.edit_message_text(
-        "📊 Шаг 3/4: Дашборд демо\n\n"
-        f"Машин: {cars}\n"
-        f"Сумма: {format_money(total)}\n"
-        f"Средний чек: {format_money(avg)}",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏆 Показать топ (демо)", callback_data="onb:step_top")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="nav:back")],
-            [InlineKeyboardButton("✖️ Выйти из тура", callback_data="onb:exit")],
-        ])
-    )
-
-
-async def onboarding_step_top(query, context):
-    leaders = [
-        {"name": "Вы", "total_amount": 16500, "shift_count": 3, "telegram_id": query.from_user.id},
-        {"name": "Коллега 1", "total_amount": 18900, "shift_count": 4, "telegram_id": 0},
-        {"name": "Коллега 2", "total_amount": 17200, "shift_count": 3, "telegram_id": 0},
-        {"name": "Коллега 3", "total_amount": 14900, "shift_count": 3, "telegram_id": 0},
-    ]
-    status = await send_status(update=type("U", (), {"callback_query": None, "message": query.message, "effective_chat": query.message.chat})(), context=context, text="🖼 Собираю красивую картинку…")
-    avatars = {1: await get_avatar_image_async(context.bot, query.from_user.id, 140, fallback_name="Вы")}
-    img = build_leaderboard_image_bytes("Демо-декада", leaders, highlight_name="Вы", top3_avatars=avatars)
-    await done_status(status, "✅ Готово! Вот ваш демо-топ.", attach_photo_bytes=img, filename="demo_top.png", caption="🏆 Демо-топ")
-    await query.message.reply_text(
-        "🎉 Шаг 4/4 завершён.\nГотово! Теперь вы умеете всё базовое.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Открыть главное меню", callback_data="back")],
-            [InlineKeyboardButton("Открыть инструменты", callback_data="nav_tools")],
-        ])
-    )
-
-
-async def onboarding_finish(query, context):
-    await query.edit_message_text("Тур завершён.")
+    await query.edit_message_text("Главное меню уже внизу 👇")
 
 
 async def cancel_add_car_callback(query, context):
@@ -1970,21 +1838,23 @@ async def handle_callback(update: Update, context: CallbackContext):
         ("shift_repeats_", export_shift_repeats),
         ("combo_builder_toggle_", combo_builder_toggle),
         ("admin_user_", admin_user_card),
+        ("admin_sub_user_", admin_user_card),
         ("admin_toggle_block_", admin_toggle_block),
+        ("admin_toggle_leaderboard_", admin_toggle_leaderboard),
         ("admin_activate_month_", admin_activate_month),
         ("admin_activate_days_prompt_", admin_activate_days_prompt),
+        ("admin_disable_subscription_", admin_disable_subscription),
         ("admin_broadcast_user_", lambda q, c, d: admin_broadcast_prepare(q, c, d.replace("admin_broadcast_user_", ""))),
         ("calendar_nav_", calendar_nav_callback),
         ("calendar_day_", calendar_day_callback),
+        ("calendar_set_", calendar_set_day_type_callback),
+        ("calendar_back_month_", calendar_back_month_callback),
         ("calendar_setup_pick_", calendar_setup_pick_callback),
         ("calendar_setup_save_", calendar_setup_save_callback),
         ("calendar_edit_toggle_", calendar_edit_toggle_callback),
-        ("demo_service_", demo_toggle_service_callback),
-        ("demo_calendar_", demo_toggle_calendar_day_callback),
         ("faq_topic_", faq_topic_callback),
         ("admin_faq_topic_edit_", admin_faq_topic_edit),
         ("admin_faq_topic_del_", admin_faq_topic_del),
-        ("onb:svc_", onboarding_toggle_service),
         ("history_decades_page_", history_decades_page),
         ("history_decade_", history_decade_days),
         ("history_day_", history_day_cars),
@@ -2016,31 +1886,6 @@ async def handle_callback(update: Update, context: CallbackContext):
 
     await query.edit_message_text("❌ Неизвестная команда")
 
-
-async def demo_toggle_calendar_day_callback(query, context, data):
-    key = data.replace("demo_calendar_", "")
-    payload = context.user_data.get("demo_payload", {"services": [], "calendar_days": []})
-    selected = payload.get("calendar_days", [])
-    if key in selected:
-        selected.remove(key)
-    else:
-        selected.append(key)
-    payload["calendar_days"] = selected
-    context.user_data["demo_payload"] = payload
-    await demo_render_card(query, context, "calendar")
-
-
-async def demo_toggle_service_callback(query, context, data):
-    sid = int(data.replace("demo_service_", ""))
-    payload = context.user_data.get("demo_payload", {"services": []})
-    selected = payload.get("services", [])
-    if sid in selected:
-        selected.remove(sid)
-    else:
-        selected.append(sid)
-    payload["services"] = selected
-    context.user_data["demo_payload"] = payload
-    await demo_render_card(query, context, "services")
 
 
 
@@ -2238,6 +2083,7 @@ async def admin_panel(query, context):
         return
     keyboard = [
         [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton("💳 Подписки", callback_data="admin_subscriptions")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast_menu")],
         [InlineKeyboardButton("❓ Редактировать FAQ", callback_data="admin_faq_menu")],
         [InlineKeyboardButton("🖼 Медиа разделов", callback_data="admin_media_menu")],
@@ -2251,6 +2097,7 @@ async def admin_panel(query, context):
 async def send_admin_panel_for_message(update: Update):
     keyboard = [
         [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton("💳 Подписки", callback_data="admin_subscriptions")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast_menu")],
         [InlineKeyboardButton("❓ Редактировать FAQ", callback_data="admin_faq_menu")],
         [InlineKeyboardButton("🖼 Медиа разделов", callback_data="admin_media_menu")],
@@ -2271,31 +2118,69 @@ async def admin_users(query, context):
     await query.edit_message_text("👥 Пользователи:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+async def admin_subscriptions(query, context):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    users = DatabaseManager.get_all_users_with_stats()
+    users_sorted = sorted(users, key=lambda u: int(u.get("telegram_id", 0)))
+    keyboard = []
+    for row in users_sorted[:40]:
+        target_user = DatabaseManager.get_user_by_id(int(row["id"]))
+        expires = subscription_expires_at_for_user(target_user) if target_user else None
+        if is_admin_telegram(int(row["telegram_id"])):
+            status = "♾️"
+        elif expires and now_local() <= expires:
+            status = f"✅ до {format_subscription_until(expires)}"
+        else:
+            status = "⛔ истекла"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{row['name']} ({row['telegram_id']}) — {status}",
+                callback_data=f"admin_sub_user_{row['id']}",
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 В админку", callback_data="admin_panel")])
+    await query.edit_message_text("💳 Подписки пользователей:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 async def admin_user_card(query, context, data):
     if not is_admin_telegram(query.from_user.id):
         return
-    user_id = int(data.replace("admin_user_", ""))
+    context.user_data["admin_user_back"] = "admin_users"
+    if data.startswith("admin_sub_user_"):
+        user_id = int(data.replace("admin_sub_user_", ""))
+        context.user_data["admin_user_back"] = "admin_subscriptions"
+    else:
+        user_id = int(data.replace("admin_user_", ""))
     users = {u["id"]: u for u in DatabaseManager.get_all_users_with_stats()}
     row = users.get(user_id)
     if not row:
         await query.answer("Пользователь не найден")
         return
     blocked = bool(int(row.get("is_blocked", 0)))
+    include_in_leaderboard = bool(int(row.get("include_in_leaderboard", 1)))
     target_user = DatabaseManager.get_user_by_id(user_id)
     expires = subscription_expires_at_for_user(target_user) if target_user else None
     sub_status = "♾️ Админ" if is_admin_telegram(int(row["telegram_id"])) else (
         f"до {format_subscription_until(expires)}" if expires and now_local() <= expires else "истекла"
     )
+    back_callback = context.user_data.get("admin_user_back", "admin_users")
     keyboard = [
         [InlineKeyboardButton("🔓 Открыть доступ" if blocked else "⛔ Закрыть доступ", callback_data=f"admin_toggle_block_{user_id}")],
+        [InlineKeyboardButton(
+            "🏆 Учитывать в лидерборде: ДА" if include_in_leaderboard else "🏆 Учитывать в лидерборде: НЕТ",
+            callback_data=f"admin_toggle_leaderboard_{user_id}",
+        )],
         [InlineKeyboardButton("🗓️ Активировать на месяц", callback_data=f"admin_activate_month_{user_id}")],
         [InlineKeyboardButton("✍️ Активировать на N дней", callback_data=f"admin_activate_days_prompt_{user_id}")],
-        [InlineKeyboardButton("🔙 К пользователям", callback_data="admin_users")],
+        [InlineKeyboardButton("🚫 Отключить подписку", callback_data=f"admin_disable_subscription_{user_id}")],
+        [InlineKeyboardButton("🔙 Назад", callback_data=back_callback)],
     ]
     await query.edit_message_text(
         f"👤 {row['name']}\nTelegram ID: {row['telegram_id']}\n"
         f"Смен: {row['shifts_count']}\nСумма: {format_money(int(row['total_amount'] or 0))}\n"
         f"Статус: {'Заблокирован' if blocked else 'Активен'}\n"
+        f"Лидерборд: {'Учитывается' if include_in_leaderboard else 'Не учитывается'}\n"
         f"Подписка: {sub_status}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2312,6 +2197,20 @@ async def admin_toggle_block(query, context, data):
         return
     new_state = not bool(int(row.get("is_blocked", 0)))
     DatabaseManager.set_user_blocked(user_id, new_state)
+    await admin_user_card(query, context, f"admin_user_{user_id}")
+
+
+async def admin_toggle_leaderboard(query, context, data):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    user_id = int(data.replace("admin_toggle_leaderboard_", ""))
+    users = {u["id"]: u for u in DatabaseManager.get_all_users_with_stats()}
+    row = users.get(user_id)
+    if not row:
+        await query.answer("Пользователь не найден")
+        return
+    new_state = not bool(int(row.get("include_in_leaderboard", 1)))
+    DatabaseManager.set_user_in_leaderboard(user_id, new_state)
     await admin_user_card(query, context, f"admin_user_{user_id}")
 
 
@@ -2347,6 +2246,30 @@ async def admin_activate_days_prompt(query, context, data):
     await query.edit_message_text(
         "Введите количество дней для активации (например, 45)."
     )
+
+
+async def admin_disable_subscription(query, context, data):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    user_id = int(data.replace("admin_disable_subscription_", ""))
+    target_user = DatabaseManager.get_user_by_id(user_id)
+    if not target_user:
+        await query.answer("Пользователь не найден")
+        return
+    disabled_at = now_local() - timedelta(seconds=1)
+    DatabaseManager.set_subscription_expires_at(user_id, disabled_at.isoformat())
+    await query.answer("Подписка отключена")
+    try:
+        await context.bot.send_message(
+            chat_id=target_user["telegram_id"],
+            text=(
+                "⛔ Ваша подписка отключена администратором.\n"
+                f"Для продления: {SUBSCRIPTION_CONTACT}"
+            )
+        )
+    except Exception:
+        pass
+    await admin_user_card(query, context, f"admin_user_{user_id}")
 
 
 def get_broadcast_recipients(target: str, admin_db_user: dict) -> list[int]:
@@ -2678,6 +2601,9 @@ async def calendar_set_day_type_callback(query, context, data):
     if not db_user:
         return
     body = data.replace("calendar_set_", "")
+    if "_" not in body:
+        await query.answer("Некорректные данные дня", show_alert=True)
+        return
     mode, day = body.split("_", 1)
     if mode == "planned":
         DatabaseManager.set_calendar_override(db_user["id"], day, "planned")
@@ -2688,7 +2614,13 @@ async def calendar_set_day_type_callback(query, context, data):
     else:
         DatabaseManager.set_calendar_override(db_user["id"], day, "")
 
-    await render_calendar_day_card(query, context, db_user, day)
+    try:
+        await render_calendar_day_card(query, context, db_user, day)
+    except BadRequest as exc:
+        if "Message is not modified" in str(exc):
+            await query.answer("Изменений нет")
+            return
+        raise
 
 
 async def calendar_back_month_callback(query, context, data):
@@ -2720,32 +2652,7 @@ async def calendar_day_callback(query, context, data):
     day = data.replace("calendar_day_", "")
 
     if context.user_data.get("calendar_edit_mode", False):
-        target = parse_iso_date(day)
-        if target:
-            overrides = DatabaseManager.get_calendar_overrides(db_user["id"])
-            base_type = get_work_day_type(db_user, target, {})
-            current_override = overrides.get(day)
-            if base_type == "planned":
-                DatabaseManager.set_calendar_override(db_user["id"], day, "" if current_override == "off" else "off")
-            else:
-                DatabaseManager.set_calendar_override(db_user["id"], day, "" if current_override == "extra" else "extra")
-
-        year, month = context.user_data.get("calendar_month", (now_local().year, now_local().month))
-        if DatabaseManager.is_goal_enabled(db_user["id"]):
-            daily_goal = calculate_current_decade_daily_goal(db_user)
-            DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
-            await send_goal_status(None, context, db_user["id"], source_message=query.message)
-        await query.edit_message_text(
-            build_work_calendar_text(db_user, year, month, setup_mode=False, edit_mode=True),
-            reply_markup=build_work_calendar_keyboard(
-                db_user,
-                year,
-                month,
-                setup_mode=False,
-                setup_selected=[],
-                edit_mode=True,
-            )
-        )
+        await render_calendar_day_card(query, context, db_user, day)
         return
 
     await query.answer("Редактирование доступно только в режиме редактирования")
@@ -2935,7 +2842,6 @@ def get_faq_topics() -> list[dict]:
             {"id": "decade", "title": "Что такое декада?", "text": "📊 Что такое декада?\n\nДекада — это 10 дней.\n\nМесяц делится на 3 части:\n1–10\n11–20\n21–конец месяца\n\nЭто удобно для промежуточных итогов и анализа."},
             {"id": "tools", "title": "Что такое “Инструменты”?", "text": "🔧 Что такое “Инструменты”?\n\nЭто дополнительный экран с расширенными функциями:\n• история\n• отчёты\n• аналитика\n• комбо\n• настройки\n\nЭто панель управления.\n\nЧтобы вернуться — нажми “Назад”."},
             {"id": "combo", "title": "Что такое “Комбо”?", "text": "💾 Что такое “Комбо”?\n\nКомбо — это набор услуг, который ты часто используешь.\n\nМожно сохранить набор и добавлять его одним нажатием.\n\nЭто ускоряет работу в 2–3 раза."},
-            {"id": "demo", "title": "Что такое демо-режим?", "text": "🧪 Что такое демо-режим?\n\nДемо — это обучение.\n\nМожно:\n• попробовать открыть смену\n• добавить машину\n• посмотреть топ\n\nИ при этом не испортить реальные данные.\n\nЕсли ты новичок — начни с демо."},
             {"id": "issues", "title": "Что делать, если что-то пошло не так?", "text": "🔄 Что делать, если что-то пошло не так?\n\n1) Проверь, открыта ли смена.\n2) Вернись в главное меню.\n3) Попробуй /start.\n4) Если проблема остаётся — обратись в поддержку.\n\nБот старается не терять данные, но лучше закрывать смену корректно."},
             {"id": "support", "title": "Поддержка", "text": "🆘 Поддержка\n\nЕсли что-то работает странно, есть идеи по улучшению или нашли баг — напишите напрямую:\n\n👉 @dakonoplev2\n\nЛучше сразу коротко описать проблему и что именно вы делали в момент ошибки."},
         ]
@@ -2966,10 +2872,6 @@ def save_faq_topics(topics: list[dict]) -> None:
     DatabaseManager.set_app_content("faq_topics_json", json.dumps(topics, ensure_ascii=False))
 
 
-def create_faq_demo_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Запустить обучение", callback_data="faq_start_demo")]])
-
-
 def create_faq_topics_keyboard(topics: list[dict], is_admin: bool = False) -> InlineKeyboardMarkup:
     icon_map = {
         "shift": "🟢",
@@ -2987,8 +2889,8 @@ def create_faq_topics_keyboard(topics: list[dict], is_admin: bool = False) -> In
         [InlineKeyboardButton(f"{icon_map.get(topic.get('id'), '📘')} {topic['title']}", callback_data=f"faq_topic_{topic['id']}")]
         for topic in topics
     ]
-    keyboard.append([InlineKeyboardButton("🚀 Запустить обучение", callback_data="faq_start_demo")])
-    keyboard.append([InlineKeyboardButton("🛠️ Управление FAQ", callback_data="admin_faq_menu")])
+    if is_admin:
+        keyboard.append([InlineKeyboardButton("🛠️ Управление FAQ", callback_data="admin_faq_menu")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -3000,8 +2902,8 @@ async def send_faq(chat_target, context: CallbackContext):
     topics = get_faq_topics()
 
     header = faq_text or (
-        "🎓 Обучение и FAQ\n"
-        "Выбери раздел с гайдом или запусти обучение."
+        "❓ FAQ\n"
+        "Выбери раздел с ответами и гайдами по работе с ботом."
     )
 
     if faq_video:
@@ -3031,193 +2933,7 @@ async def send_faq(chat_target, context: CallbackContext):
     )
 
 
-def build_feature_overview_text() -> str:
-    return (
-        "🗺️ Полный обзор функций\n\n"
-        "1) 🚘 Работа в смене\n"
-        "• Открываешь смену\n"
-        "• Вводишь номер ТС\n"
-        "• Выбираешь услуги кнопками, поиск или комбо\n"
-        "• Фиксируешь сумму по машине и смене\n\n"
-        "2) 📊 Аналитика и отчёты\n"
-        "• История по декадам\n"
-        "• Эффективность текущей декады\n"
-        "• Топ героев\n"
-        "• Экспорт PDF/XLSX\n\n"
-        "3) 🧰 Инструменты\n"
-        "• Прайс день/ночь\n"
-        "• Календарь смен и план\n"
-        "• Настройки и комбо\n\n"
-        "4) 👤 Профиль и доступ\n"
-        "• Статус подписки\n"
-        "• Продление\n"
-        "• Управление аккаунтом\n\n"
-        "Хочешь быстро освоиться — запусти интерактивное обучение ниже."
-    )
-
-
-async def faq_overview_callback(query, context):
-    await query.edit_message_text(
-        "Раздел отключён. Используй кнопки FAQ.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="faq")]]),
-    )
-
-
-async def demo_render_card(query, context, step: str):
-    payload = context.user_data.get("demo_payload", {"services": [], "calendar_days": [], "car_number": ""})
-    services = payload.get("services", [])
-    car_number = payload.get("car_number", "Х340РУ797")
-    calendar_days = payload.get("calendar_days", [])
-
-    if step == "start":
-        text = (
-            "👋 Добро пожаловать в интерактивное обучение.\n\n"
-            "Это тренажёр на реальном интерфейсе бота (без сохранения в историю).\n\n"
-            "Шаги:\n"
-            "1) Открытие смены и ввод номера\n"
-            "2) Добавление услуг (как в боевом режиме)\n"
-            "3) Выбор рабочих дней в календаре\n"
-            "4) Просмотр итогов и переход к реальной работе"
-        )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Начать демо", callback_data="demo_step_shift")]])
-    elif step == "shift":
-        text = (
-            "✅ Шаг 1/4: Смена открыта (демо).\n"
-            "Отправьте номер авто в чат — как в обычной работе.\n"
-            "Например: Х340РУ"
-        )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏭ Использовать пример номера", callback_data="demo_step_services")]])
-        context.user_data["demo_waiting_car"] = True
-    elif step == "services":
-        total = sum(get_current_price(sid, "day") for sid in services)
-        text = (
-            f"🚗 Шаг 2/4: Машина {car_number}\n"
-            "Добавьте услуги так же, как в реальной смене.\n"
-            "Ничего не сохранится в историю.\n\n"
-            f"Выбрано услуг: {len(services)}\n"
-            f"Сумма по машине: {format_money(total)}"
-        )
-        rows = []
-        for sid in [1, 2, 3, 4, 5, 6, 7, 8]:
-            mark = "✅" if sid in services else "▫️"
-            rows.append([InlineKeyboardButton(f"{mark} {plain_service_name(SERVICES[sid]['name'])}", callback_data=f"demo_service_{sid}")])
-        rows.append([InlineKeyboardButton("➡️ Ещё услуги", callback_data="demo_step_services_adv")])
-        rows.append([InlineKeyboardButton("📅 К календарю демо", callback_data="demo_step_calendar")])
-        kb = InlineKeyboardMarkup(rows)
-    elif step == "services_adv":
-        total = sum(get_current_price(sid, "day") for sid in services)
-        text = (
-            f"🚗 Шаг 2/4: Машина {car_number} (доп. услуги)\n"
-            "Редкие услуги из того же прайса.\n\n"
-            f"Выбрано услуг: {len(services)}\n"
-            f"Сумма по машине: {format_money(total)}"
-        )
-        rows = []
-        for sid in [9, 12, 13, 14, 16, 18, 19, 21]:
-            mark = "✅" if sid in services else "▫️"
-            rows.append([InlineKeyboardButton(f"{mark} {plain_service_name(SERVICES[sid]['name'])}", callback_data=f"demo_service_{sid}")])
-        rows.append([InlineKeyboardButton("⬅️ К основным", callback_data="demo_step_services")])
-        rows.append([InlineKeyboardButton("📅 К календарю демо", callback_data="demo_step_calendar")])
-        kb = InlineKeyboardMarkup(rows)
-    elif step == "calendar":
-        today = now_local().date()
-        week_dates = [today + timedelta(days=i) for i in range(7)]
-        selected_count = len(calendar_days)
-        selected_hint = ", ".join(d[-5:] for d in calendar_days[:5]) if calendar_days else "не выбраны"
-        text = (
-            "📅 Шаг 3/4: Календарь (тренажёр).\n"
-            "Выберите рабочие дни на ближайшую неделю.\n"
-            "Это поможет понять логику планирования смен.\n\n"
-            f"Отмечено дней: {selected_count}\n"
-            f"Выбрано: {selected_hint}\n\n"
-            "ℹ️ В демо календарь не меняет реальные данные аккаунта."
-        )
-        rows = []
-        for d in week_dates:
-            key = d.isoformat()
-            mark = "✅" if key in calendar_days else "▫️"
-            rows.append([InlineKeyboardButton(f"{mark} {d.strftime('%a %d.%m')}", callback_data=f"demo_calendar_{key}")])
-        rows.append([
-            InlineKeyboardButton("⬅️ К услугам", callback_data="demo_step_services_adv"),
-            InlineKeyboardButton("⏭ Дальше", callback_data="demo_step_leaderboard"),
-        ])
-        kb = InlineKeyboardMarkup(rows)
-    elif step == "leaderboard":
-        today = now_local().date()
-        idx, _, _, _, decade_title = get_decade_period(today)
-        decade_leaders = DatabaseManager.get_decade_leaderboard(today.year, today.month, idx)
-        top_block = "\n".join(
-            f"{place}. {row['name']} — {format_money(int(row['total_amount'] or 0))}"
-            for place, row in enumerate(decade_leaders[:5], start=1)
-        ) if decade_leaders else "Пока нет данных по декаде."
-        text = (
-            "📊 Шаг 4/4: Итог демо и аналитика.\n"
-            f"Декада: {decade_title}\n"
-            f"Машина: {car_number}\n"
-            f"Услуг в демо: {len(services)}\n"
-            f"Рабочих дней в демо-календаре: {len(calendar_days)}\n\n"
-            f"{top_block}\n\n"
-            "В реальном режиме данные сохраняются в историю, отчёты и рейтинг."
-        )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Завершить демо", callback_data="demo_step_done")]])
-    elif step == "done":
-        total = sum(get_current_price(sid, "day") for sid in services)
-        text = (
-            "🎉 Отлично! Вы прошли демо.\n\n"
-            f"Услуг выбрано: {len(services)}\n"
-            f"Сумма: {format_money(total)}\n"
-            f"Отмечено смен в календаре: {len(calendar_days)}\n\n"
-            "Теперь можно перейти к реальной работе в боте."
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 К FAQ", callback_data="faq")],
-            [InlineKeyboardButton("✖️ Выйти из демо", callback_data="demo_exit")],
-        ])
-    else:
-        text = "Демо завершено."
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К FAQ", callback_data="faq")]])
-
-    await query.edit_message_text(text, reply_markup=kb)
-
-
-async def demo_start(query, context):
-    context.user_data["demo_mode"] = True
-    context.user_data["demo_payload"] = {"services": [], "calendar_days": [], "car_number": "Х340РУ797"}
-    context.user_data["demo_waiting_car"] = False
-    await demo_render_card(query, context, "start")
-
-
-async def demo_handle_car_text(update: Update, context: CallbackContext):
-    if not context.user_data.get("demo_mode"):
-        return False
-    if context.user_data.get("demo_waiting_car") is not True:
-        return False
-
-    raw = (update.message.text or "").strip()
-    is_valid, normalized, error = validate_car_number(raw)
-    if not is_valid:
-        await update.message.reply_text(f"❌ В демо не распознал номер: {error}\nПопробуй ещё раз.")
-        return True
-
-    payload = context.user_data.get("demo_payload", {"services": [], "calendar_days": []})
-    payload["car_number"] = normalized
-    payload["services"] = []
-    context.user_data["demo_waiting_car"] = False
-    context.user_data["demo_payload"] = payload
-    await update.message.reply_text(
-        f"✅ Номер распознан: {normalized}\nОткрываю демо-выбор услуг.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧪 Перейти к услугам (демо)", callback_data="demo_step_services")],
-        ]),
-    )
-    return True
-
-
 async def faq_message(update: Update, context: CallbackContext):
-    has_active = False
-    db_user = DatabaseManager.get_user(update.effective_user.id)
-    if db_user:
-        has_active = DatabaseManager.get_active_shift(db_user['id']) is not None
     await send_faq(update.message, context)
 
 
@@ -4223,7 +3939,7 @@ async def calendar_rebase_callback(query, context):
 
 
 def build_leaderboard_text(decade_title: str, decade_leaders: list[dict]) -> str:
-    header = [f"🏆 Топ героев", f"📆 Декада: {decade_title}"]
+    header = ["🏆 Топ героев", f"📆 Декада: {decade_title}"]
     if not decade_leaders:
         return "\n".join(header + ["Пока нет данных за декаду"])
     lines = []
@@ -4289,8 +4005,6 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
 
     title_font = _load_rank_font(ImageFont, 48)
     sec_font = _load_rank_font(ImageFont, 24)
-    card_font = _load_rank_font(ImageFont, 28)
-    amount_font = _load_rank_font(ImageFont, 32)
     small_font = _load_rank_font(ImageFont, 20)
 
     def _rounded_card(x1, y1, x2, y2, fill=(17, 27, 50, 170), outline=(120, 146, 198, 80), r=24):
@@ -4764,18 +4478,6 @@ async def decade_message(update: Update, context: CallbackContext):
         reply_markup=create_main_reply_keyboard(True)
     )
 
-async def stats_message(update: Update, context: CallbackContext):
-    user = update.effective_user
-    db_user = DatabaseManager.get_user(user.id)
-    if not db_user:
-        await update.message.reply_text("❌ Ошибка: пользователь не найден")
-        return
-    message = build_stats_summary(db_user['id'])
-    await update.message.reply_text(
-        message,
-        reply_markup=create_main_reply_keyboard(True)
-    )
-
 async def show_car_services(
     query,
     context: CallbackContext,
@@ -4969,7 +4671,7 @@ async def notify_subscription_events(application: Application):
                     pass
                 DatabaseManager.set_app_content(key, "1")
 
-        if days_left < 0:
+        if days_left <= 0:
             key = f"sub_notice_expired_{row['id']}_{expires_date.isoformat()}"
             if DatabaseManager.get_app_content(key, "") != "1":
                 try:
