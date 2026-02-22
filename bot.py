@@ -26,6 +26,7 @@ from telegram import (
     KeyboardButton,
     InputMediaPhoto,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -2600,6 +2601,9 @@ async def calendar_set_day_type_callback(query, context, data):
     if not db_user:
         return
     body = data.replace("calendar_set_", "")
+    if "_" not in body:
+        await query.answer("Некорректные данные дня", show_alert=True)
+        return
     mode, day = body.split("_", 1)
     if mode == "planned":
         DatabaseManager.set_calendar_override(db_user["id"], day, "planned")
@@ -2610,7 +2614,13 @@ async def calendar_set_day_type_callback(query, context, data):
     else:
         DatabaseManager.set_calendar_override(db_user["id"], day, "")
 
-    await render_calendar_day_card(query, context, db_user, day)
+    try:
+        await render_calendar_day_card(query, context, db_user, day)
+    except BadRequest as exc:
+        if "Message is not modified" in str(exc):
+            await query.answer("Изменений нет")
+            return
+        raise
 
 
 async def calendar_back_month_callback(query, context, data):
