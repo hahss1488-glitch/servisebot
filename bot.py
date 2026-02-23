@@ -41,13 +41,14 @@ from database import DatabaseManager, init_database, DB_PATH
 from exports import create_decade_pdf, create_decade_xlsx, create_month_xlsx
 from leaderboard.avatars import get_avatar_image as get_avatar_image_async
 from services.status import send_status, edit_status, done_status
+from services.planning import compute_plan_metrics
 from ui.texts import STATUS_LEADERBOARD
 from ui.nav import push_screen, pop_screen, get_current_screen, Screen
 
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 )
 logger = logging.getLogger(__name__)
 APP_VERSION = "2026.02.19-hotfix-23"
@@ -762,38 +763,46 @@ def build_shift_metrics(shift: dict, cars: list[dict], total: int) -> dict:
 
 
 def build_current_shift_dashboard(user_id: int, shift: dict, cars: list[dict], total: int) -> str:
-    today = now_local().date()
-    day_key = today.isoformat()
+    db_user = DatabaseManager.get_user_by_id(user_id)
+    if not db_user:
+        return "❌ Пользователь не найден"
 
-    today_cars = DatabaseManager.get_user_cars_count_for_date(user_id, day_key)
-    today_income = DatabaseManager.get_user_total_for_date(user_id, day_key)
+    shift_start = parse_datetime(shift.get("start_time"))
+    shift_start_label = shift_start.strftime("%d.%m %H:%M") if shift_start else "—"
+    shift_cars = len(cars)
+    shift_income = int(total or 0)
 
-    _, start_d, end_d, _, _ = get_decade_period(today)
-    total_days = max((end_d - start_d).days + 1, 1)
-    days_elapsed = max(1, min((today - start_d).days + 1, total_days))
-    remaining_days_including_today = max(1, total_days - (days_elapsed - 1))
+    p = calculate_current_decade_shift_plan(db_user)
+    decade_plan_total = int(p["decade_goal"])
+    decade_earned_total = int(p["earned_decade"])
+    decade_remaining = int(p["remaining"])
+    day_plan = int(p["avg_per_shift"])
+    need_today = int(p["need_today"])
+    work_units_left = int(p["work_units_left"])
+    delta = int(p["delta"])
 
-    decade_plan_total = DatabaseManager.get_decade_goal(user_id) if DatabaseManager.is_goal_enabled(user_id) else 0
-    decade_earned_total = DatabaseManager.get_user_total_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
-    decade_remaining = max(decade_plan_total - decade_earned_total, 0)
-
-    day_plan = ceil(decade_plan_total / total_days) if decade_plan_total > 0 else 0
-    need_today = ceil(decade_remaining / remaining_days_including_today) if decade_remaining > 0 else 0
+    logger.debug(
+        "dashboard planning metrics user_id=%s days_total=%s days_left_including_today=%s remaining=%s need_today=%s avg_per_day=%s",
+        user_id,
+        p["work_units_total"],
+        work_units_left,
+        decade_remaining,
+        need_today,
+        day_plan,
+    )
 
     if need_today > 0:
-        today_percent = calculate_percent(today_income, need_today)
+        today_percent = calculate_percent(shift_income, need_today)
         progress_bar = render_bar(today_percent, 10)
-        runrate_to_need_today = (today_income / need_today) - 1
+        runrate_to_need_today = (shift_income / need_today) - 1
         runrate_line = f"⚡ Ранрейт к нужному сегодня: {runrate_to_need_today:+.0%}"
-        today_line = f"{format_money(today_income)} / {format_money(need_today)} нужно сегодня"
+        today_line = f"{format_money(shift_income)} / {format_money(need_today)} нужно сегодня"
     else:
         today_percent = 100
         progress_bar = render_bar(today_percent, 10)
         runrate_line = "⚡ Ранрейт к нужному сегодня: План закрыт ✅"
-        today_line = f"{format_money(today_income)} / План закрыт ✅"
+        today_line = f"{format_money(shift_income)} / План закрыт ✅"
 
-    planned_by_today = day_plan * days_elapsed
-    delta = decade_earned_total - planned_by_today
     if delta < 0:
         delta_line = f"Отставание на текущий день: -{format_money(abs(delta))}"
     else:
@@ -801,40 +810,37 @@ def build_current_shift_dashboard(user_id: int, shift: dict, cars: list[dict], t
 
     return (
         "📅 Сегодня:\n"
-        f"Машин: {today_cars}\n"
+        f"Смена идёт с: {shift_start_label}\n"
+        f"Машин: {shift_cars}\n"
         f"Доход: {today_line}\n"
         f"% выполнения: {today_percent}%\n"
         f"{progress_bar}\n\n"
         "🎯 План декады:\n"
         f"Всего заработано: {format_money(decade_earned_total)} / {format_money(decade_plan_total)}\n"
         f"Осталось: {format_money(decade_remaining)}\n"
-        f"Осталось дней (включая сегодня): {remaining_days_including_today}\n"
+        f"Осталось смен (включая текущую): {work_units_left}\n"
         f"Нужно в день, чтобы успеть: {format_money(need_today)}\n"
-        f"Средний план по декаде: {format_money(day_plan)}/день\n"
+        f"Средний план по декаде: {format_money(day_plan)}/смена\n"
         f"{delta_line}\n\n"
         f"{runrate_line}"
     )
 
 
 def _test_decade_plan_math_cases() -> None:
-    def calc(decade_plan_total: int, decade_earned_total: int, day_earned: int, days_total: int, days_elapsed: int):
-        remaining_days_including_today = max(1, days_total - (days_elapsed - 1))
-        decade_remaining = max(0, decade_plan_total - decade_earned_total)
-        day_plan = ceil(decade_plan_total / days_total) if decade_plan_total > 0 else 0
-        need_today = ceil(decade_remaining / remaining_days_including_today) if decade_remaining > 0 else 0
-        return remaining_days_including_today, decade_remaining, day_plan, need_today
+    # A) по календарным дням (рабочие дни не участвуют)
+    m = compute_plan_metrics(date(2026, 2, 15), date(2026, 2, 11), date(2026, 2, 20), 35000, 15140, 2000)
+    assert int(m["days_left_including_today"]) == 6
+    assert int(m["need_today"]) == 3310
 
-    # Середина декады
-    rem_days, rem, day_plan, need_today = calc(35000, 12000, 2500, 10, 5)
-    assert rem_days == 6 and rem == 23000 and day_plan == 3500 and need_today == 3834
+    # B) последний день периода
+    m = compute_plan_metrics(date(2026, 2, 20), date(2026, 2, 11), date(2026, 2, 20), 35000, 22717, 1000)
+    assert int(m["days_left_including_today"]) == 1
+    assert int(m["need_today"]) == 12283
 
-    # Последний день декады
-    rem_days, rem, day_plan, need_today = calc(35000, 22717, 1000, 10, 10)
-    assert rem_days == 1 and rem == 12283 and day_plan == 3500 and need_today == 12283
-
-    # План уже выполнен
-    rem_days, rem, day_plan, need_today = calc(35000, 36000, 500, 10, 8)
-    assert rem == 0 and need_today == 0 and day_plan == 3500
+    # C) remaining == 0
+    m = compute_plan_metrics(date(2026, 2, 18), date(2026, 2, 11), date(2026, 2, 20), 35000, 36000, 500)
+    assert int(m["remaining"]) == 0
+    assert int(m["need_today"]) == 0
 
 
 def _test_msk_day_rollover_query() -> None:
@@ -917,6 +923,10 @@ def build_shift_repeat_report_text(shift_id: int) -> str:
     return "\n".join(lines)
 
 
+def build_shift_number_label(shift_id: int) -> str:
+    return f"Смена #{shift_id}"
+
+
 def build_period_summary_text(user_id: int, start_d: date, end_d: date, title: str) -> str:
     total = DatabaseManager.get_user_total_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
     shifts_count = DatabaseManager.get_shifts_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
@@ -944,19 +954,45 @@ def get_goal_text(user_id: int) -> str:
     if not DatabaseManager.is_goal_enabled(user_id):
         return ""
 
-    goal = DatabaseManager.get_daily_goal(user_id)
-    if goal <= 0:
+    db_user = DatabaseManager.get_user_by_id(user_id)
+    if not db_user:
         return ""
-    today_total = DatabaseManager.get_user_total_for_date(user_id, now_local().date().isoformat())
-    percent = calculate_percent(today_total, goal)
+
+    active_shift = DatabaseManager.get_active_shift(user_id)
+    shift_total = DatabaseManager.get_shift_total(active_shift["id"]) if active_shift else 0
+
+    p = calculate_current_decade_shift_plan(db_user)
+    need_today = int(p["need_today"])
+    decade_plan_total = int(p["decade_goal"])
+
+    logger.debug(
+        "pinned planning metrics user_id=%s work_units_total=%s work_units_left=%s remaining=%s need_today=%s avg_per_shift=%s shift_id=%s",
+        user_id,
+        p["work_units_total"],
+        p["work_units_left"],
+        p["remaining"],
+        need_today,
+        p["avg_per_shift"],
+        active_shift["id"] if active_shift else 0,
+    )
+
+    if decade_plan_total <= 0:
+        return ""
+    percent = 100 if need_today == 0 else calculate_percent(int(shift_total), need_today)
     bar = render_bar(percent, 10)
-    return f"Цель: {format_money(today_total)}/{format_money(goal)} {bar}"
+    if not active_shift:
+        return f"Цель: {format_money(0)} / {format_money(need_today)}\nСмена не открыта {bar}"
+    return f"Цель: {format_money(int(shift_total))} / {format_money(need_today)} {bar}"
 
 
 def calculate_current_decade_daily_goal(db_user: dict) -> int:
+    plan = calculate_current_decade_shift_plan(db_user)
+    return int(plan["need_today"])
+
+
+def calculate_current_decade_shift_plan(db_user: dict) -> dict:
     today = now_local().date()
-    decade_index = 1 if today.day <= 10 else 2 if today.day <= 20 else 3
-    start_d, end_d = get_decade_range_by_index(today.year, today.month, decade_index)
+    _, start_d, end_d, _, _ = get_decade_period(today)
     overrides = DatabaseManager.get_calendar_overrides(db_user["id"])
     month_days = DatabaseManager.get_days_for_month(db_user["id"], f"{today.year:04d}-{today.month:02d}")
     actual_shift_days = {
@@ -964,26 +1000,43 @@ def calculate_current_decade_daily_goal(db_user: dict) -> int:
         for row in month_days
         if int(row.get("shifts_count", 0) or 0) > 0
     }
-    work_days = 0
-    remaining_days = 0
+
+    work_units_total = 0
+    work_units_elapsed = 0
+    work_units_left = 0
     cursor = start_d
-    today = now_local().date()
     while cursor <= end_d:
         day_key = cursor.isoformat()
         day_type = get_work_day_type(db_user, cursor, overrides)
-        if day_type in {"planned", "extra"} or (day_type == "off" and day_key in actual_shift_days):
-            work_days += 1
+        is_unit = day_type in {"planned", "extra"} or (day_type == "off" and day_key in actual_shift_days)
+        if is_unit:
+            work_units_total += 1
+            if cursor <= today:
+                work_units_elapsed += 1
             if cursor >= today:
-                remaining_days += 1
+                work_units_left += 1
         cursor += timedelta(days=1)
+
     decade_goal = DatabaseManager.get_decade_goal(db_user["id"])
-    if decade_goal <= 0 or work_days <= 0:
-        return 0
     earned = DatabaseManager.get_user_total_between_dates(db_user["id"], start_d.isoformat(), end_d.isoformat())
-    remaining_amount = max(decade_goal - earned, 0)
-    if remaining_days <= 0:
-        return 0
-    return int(remaining_amount / remaining_days)
+    remaining = max(0, decade_goal - earned)
+    denom_total = max(1, work_units_total)
+    denom_left = max(1, work_units_left)
+    avg_per_shift = int((decade_goal + denom_total - 1) / denom_total) if decade_goal > 0 else 0
+    need_today = int((remaining + denom_left - 1) / denom_left) if remaining > 0 else 0
+    planned_by_today = avg_per_shift * max(1, work_units_elapsed)
+    delta = earned - planned_by_today
+
+    return {
+        "decade_goal": decade_goal,
+        "earned_decade": earned,
+        "remaining": remaining,
+        "work_units_total": work_units_total,
+        "work_units_left": work_units_left,
+        "avg_per_shift": avg_per_shift,
+        "need_today": need_today,
+        "delta": delta,
+    }
 
 
 def get_edit_mode(context: CallbackContext, car_id: int) -> bool:
@@ -1087,6 +1140,19 @@ async def send_goal_status(update: Update | None, context: CallbackContext, user
             await context.bot.edit_message_text(chat_id=bind_chat_id, message_id=bind_message_id, text=goal_text)
             await ensure_goal_message_pinned(context, int(bind_chat_id), int(bind_message_id))
             return
+        except BadRequest as exc:
+            if "Message is not modified" in str(exc):
+                await ensure_goal_message_pinned(context, int(bind_chat_id), int(bind_message_id))
+                return
+            try:
+                await context.bot.unpin_chat_message(chat_id=bind_chat_id, message_id=bind_message_id)
+            except Exception:
+                pass
+            try:
+                await context.bot.delete_message(chat_id=bind_chat_id, message_id=bind_message_id)
+            except Exception:
+                pass
+            DatabaseManager.clear_goal_message_binding(user_id)
         except Exception:
             DatabaseManager.clear_goal_message_binding(user_id)
 
@@ -2627,6 +2693,11 @@ async def calendar_set_day_type_callback(query, context, data):
             return
         raise
 
+    if DatabaseManager.is_goal_enabled(db_user["id"]):
+        daily_goal = calculate_current_decade_daily_goal(db_user)
+        DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
+        await send_goal_status(None, context, db_user["id"], source_message=query.message)
+
 
 async def calendar_back_month_callback(query, context, data):
     db_user = DatabaseManager.get_user(query.from_user.id)
@@ -3220,7 +3291,8 @@ async def history_day_cars(query, context, data):
     keyboard = []
     subscription_active = is_subscription_active(db_user)
     for car in cars:
-        message += f"• #{car['id']} {car['car_number']} — {format_money(int(car['total_amount']))}\n"
+        shift_label = build_shift_number_label(int(car.get("shift_id") or 0))
+        message += f"• {shift_label}: #{car['id']} {car['car_number']} — {format_money(int(car['total_amount']))}\n"
         if subscription_active:
             keyboard.append([
                 InlineKeyboardButton(
@@ -3841,10 +3913,26 @@ async def close_shift_confirm_yes(query, context, data):
         return
 
     total = DatabaseManager.get_shift_total(shift_id)
-    DatabaseManager.close_shift(shift_id)
-    DatabaseManager.clear_goal_message_binding(db_user['id'])
-    closed_shift = DatabaseManager.get_shift(shift_id) or shift
     cars = DatabaseManager.get_shift_cars(shift_id)
+    if not cars:
+        DatabaseManager.delete_shift(shift_id)
+        if DatabaseManager.is_goal_enabled(db_user["id"]):
+            daily_goal = calculate_current_decade_daily_goal(db_user)
+            DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
+            await send_goal_status(None, context, db_user["id"], source_message=query.message)
+        await query.edit_message_text("🗑️ Пустая смена удалена и не сохранена в истории.")
+        await query.message.reply_text(
+            "Выбери действие:",
+            reply_markup=create_main_reply_keyboard(False)
+        )
+        return
+
+    DatabaseManager.close_shift(shift_id)
+    if DatabaseManager.is_goal_enabled(db_user["id"]):
+        daily_goal = calculate_current_decade_daily_goal(db_user)
+        DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
+        await send_goal_status(None, context, db_user["id"], source_message=query.message)
+    closed_shift = DatabaseManager.get_shift(shift_id) or shift
     message = build_closed_shift_dashboard(closed_shift, cars, total)
 
     await query.edit_message_text(

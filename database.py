@@ -302,6 +302,16 @@ class DatabaseManager:
         conn.close()
 
     @staticmethod
+    def delete_shift(shift_id: int) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM car_services WHERE car_id IN (SELECT id FROM cars WHERE shift_id = ?)", (shift_id,))
+        cur.execute("DELETE FROM cars WHERE shift_id = ?", (shift_id,))
+        cur.execute("DELETE FROM shifts WHERE id = ?", (shift_id,))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
     def get_daily_goal(user_id: int) -> int:
         conn = get_connection()
         cur = conn.cursor()
