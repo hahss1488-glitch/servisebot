@@ -1,2 +1,5 @@
 python-telegram-bot==20.7
 Pillow==10.4.0
+fastapi
+uvicorn[standard]
+pydantic
