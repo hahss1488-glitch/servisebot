@@ -6,34 +6,34 @@ from functools import lru_cache
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 TOKENS = {
-    "BG_TOP": "#06101C",
-    "BG_MID": "#081426",
-    "BG_BOTTOM": "#0B1830",
-    "CYAN": "#56D7FF",
-    "ELECTRIC_BLUE": "#4A7DFF",
-    "VIOLET": "#8B6DFF",
-    "MAGENTA": "#C86BFF",
-    "AQUA": "#5CF2D6",
-    "TEXT_PRIMARY": (247, 251, 255, 255),
-    "TEXT_SECONDARY": (215, 229, 245, 255),
-    "TEXT_MUTED": (142, 166, 194, 255),
-    "POSITIVE": (99, 245, 198, 255),
-    "NEGATIVE": (255, 115, 155, 255),
+    "BG_TOP": "#040B16",
+    "BG_MID": "#071225",
+    "BG_BOTTOM": "#0A1830",
+    "CYAN": "#63E0FF",
+    "ELECTRIC_BLUE": "#4D8CFF",
+    "VIOLET": "#8C72FF",
+    "MAGENTA": "#D86EFF",
+    "AQUA": "#67F5D1",
+    "TEXT_PRIMARY": (248, 251, 255, 255),
+    "TEXT_SECONDARY": (220, 232, 247, 255),
+    "TEXT_MUTED": (145, 169, 198, 255),
+    "POSITIVE": (103, 245, 209, 255),
+    "NEGATIVE": (255, 127, 168, 255),
     "WARNING": (255, 200, 106, 255),
-    "GLASS_FILL_LIGHT": (255, 255, 255, 31),
-    "GLASS_FILL_MID": (255, 255, 255, 23),
-    "GLASS_FILL_DARK": (255, 255, 255, 15),
-    "GLASS_BORDER": (255, 255, 255, 51),
-    "GLASS_BORDER_BRIGHT": (255, 255, 255, 71),
-    "GLASS_TOP_HIGHLIGHT": (255, 255, 255, 61),
-    "GLASS_INNER_HAZE": (255, 255, 255, 13),
+    "GLASS_FILL_LIGHT": (255, 255, 255, 36),
+    "GLASS_FILL_MID": (255, 255, 255, 30),
+    "GLASS_FILL_DARK": (255, 255, 255, 23),
+    "GLASS_BORDER": (255, 255, 255, 54),
+    "GLASS_BORDER_BRIGHT": (255, 255, 255, 62),
+    "GLASS_TOP_HIGHLIGHT": (255, 255, 255, 72),
+    "GLASS_INNER_HAZE": (255, 255, 255, 18),
 }
 
 MATERIALS = {
-    "hero": {"fill": TOKENS["GLASS_FILL_LIGHT"], "border": TOKENS["GLASS_BORDER_BRIGHT"], "blur": 30, "shadow": 42},
-    "primary": {"fill": TOKENS["GLASS_FILL_MID"], "border": TOKENS["GLASS_BORDER"], "blur": 24, "shadow": 34},
-    "metric": {"fill": TOKENS["GLASS_FILL_DARK"], "border": (255, 255, 255, 43), "blur": 18, "shadow": 22},
-    "pill": {"fill": (255, 255, 255, 24), "border": (255, 255, 255, 56), "blur": 14, "shadow": 14},
+    "hero": {"fill": TOKENS["GLASS_FILL_LIGHT"], "border": TOKENS["GLASS_BORDER_BRIGHT"], "blur": 28, "shadow": 32},
+    "primary": {"fill": TOKENS["GLASS_FILL_MID"], "border": TOKENS["GLASS_BORDER"], "blur": 22, "shadow": 26},
+    "metric": {"fill": TOKENS["GLASS_FILL_DARK"], "border": (255, 255, 255, 46), "blur": 15, "shadow": 16},
+    "pill": {"fill": (255, 255, 255, 28), "border": (255, 255, 255, 58), "blur": 12, "shadow": 10},
 }
 
 TYPE_STYLES = {
@@ -162,8 +162,8 @@ def create_aurora_background(width: int, height: int, seed: int = 42) -> Image.I
         bd.ellipse((x, y, x + bw, y + bh), fill=color)
     blob_layer = blob_layer.filter(ImageFilter.GaussianBlur(135))
     image.alpha_composite(blob_layer)
-    apply_vignette(image, 0.31)
-    add_noise_overlay(image, opacity=8, seed=seed + 99)
+    apply_vignette(image, 0.28)
+    add_noise_overlay(image, opacity=7, seed=seed + 99)
     return image
 
 
@@ -197,12 +197,12 @@ def draw_glow(image: Image.Image, bbox: tuple[int, int, int, int], color: tuple[
     image.alpha_composite(layer.filter(ImageFilter.GaussianBlur(blur)))
 
 
-def draw_soft_reflection(target: Image.Image, radius: int = 6):
+def draw_soft_reflection(target: Image.Image, radius: int = 5):
     w, h = target.size
     layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer, "RGBA")
-    for y in range(max(12, h // 3)):
-        a = int(40 * (1 - y / max(h // 3, 1)))
+    for y in range(max(10, h // 3)):
+        a = int(34 * (1 - y / max(h // 3, 1)))
         d.line((10, y + 8, w - 10, y + 8), fill=(255, 255, 255, a))
     target.alpha_composite(layer.filter(ImageFilter.GaussianBlur(radius)))
 
@@ -219,15 +219,15 @@ def draw_glass_card(canvas: Image.Image, background: Image.Image, bbox: tuple[in
 
     shadow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     sd = ImageDraw.Draw(shadow, "RGBA")
-    sd.rounded_rectangle((x1 + 2, y1 + 8, x2 + 2, y2 + 14), radius=radius, fill=(0, 0, 0, m["shadow"]))
-    canvas.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(16)))
+    sd.rounded_rectangle((x1 + 2, y1 + 6, x2 + 2, y2 + 10), radius=radius, fill=(0, 0, 0, m["shadow"]))
+    canvas.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(12)))
 
     card = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(card, "RGBA")
     d.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=m["fill"])
     d.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, outline=(TOKENS["GLASS_BORDER_BRIGHT"] if border_bright else m["border"]), width=2)
     d.rounded_rectangle((3, 3, w - 4, max(10, h // 2)), radius=max(8, radius - 8), outline=TOKENS["GLASS_TOP_HIGHLIGHT"], width=1)
-    d.rounded_rectangle((4, h // 2, w - 5, h - 5), radius=max(8, radius - 10), fill=TOKENS["GLASS_INNER_HAZE"])
+    d.rounded_rectangle((6, h // 2 + 4, w - 7, h - 7), radius=max(8, radius - 12), fill=TOKENS["GLASS_INNER_HAZE"])
     draw_soft_reflection(card)
     canvas.alpha_composite(card, (x1, y1))
 
@@ -279,7 +279,7 @@ def draw_progress_bar(canvas: Image.Image, bbox: tuple[int, int, int, int], prog
     canvas.paste(fill, (x1 + 2, y1 + 2), rounded_mask((fw, h - 4), (h - 4) // 2))
     glow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow, "RGBA")
-    gd.rounded_rectangle((x1 + 1, y1 + 1, x1 + fw + 3, y2 + 1), radius=h // 2, fill=(86, 215, 255, 72))
+    gd.rounded_rectangle((x1 + 2, y1 + 2, x1 + fw + 2, y2), radius=h // 2, fill=(99, 224, 255, 64))
     canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(8)))
 
 
