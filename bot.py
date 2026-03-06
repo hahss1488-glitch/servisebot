@@ -45,6 +45,7 @@ from services.status import send_status, edit_status, done_status
 from services.planning import compute_plan_metrics
 from ui.texts import STATUS_LEADERBOARD
 from ui.nav import push_screen, pop_screen, get_current_screen, Screen
+from ui.premium_renderer import render_dashboard_image_bytes, render_leaderboard_image_bytes
 from ui.glass_ui import (
     TOKENS,
     create_aurora_background,
@@ -4527,6 +4528,8 @@ def _fit_name_lines(draw, text: str, max_w: int, max_lines: int, base_size: int,
 def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
         return None
+    return render_leaderboard_image_bytes(decade_title, decade_leaders, highlight_name=highlight_name, top3_avatars=top3_avatars)
+
     from PIL import ImageDraw
 
     width, height = 1600, 900
@@ -4639,6 +4642,8 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
 def _build_dashboard_image(mode: str, payload: dict) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
         return None
+    return render_dashboard_image_bytes(mode, payload)
+
     from PIL import ImageDraw
 
     w, h = 1600, 900
