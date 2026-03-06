@@ -4177,13 +4177,18 @@ def _truncate_to_width(draw, text: str, font, max_w: int) -> str:
     return tail
 
 
+def _hex_rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
+    h = hex_color.lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), alpha)
+
+
 def draw_background(image, draw):
     from PIL import Image, ImageDraw, ImageFilter
 
     width, height = image.size
-    top = (0x2A, 0x00, 0x03)
-    mid = (0x5A, 0x00, 0x0A)
-    bottom = (0x1A, 0x00, 0x02)
+    bg_top = _hex_rgba("#2A0003")
+    bg_mid = _hex_rgba("#5A000A")
+    bg_bottom = _hex_rgba("#1A0002")
 
     for y in range(height):
         t = y / max(height - 1, 1)
@@ -4192,78 +4197,157 @@ def draw_background(image, draw):
             c1, c2 = top, mid
         else:
             k = (t - 0.56) / 0.44
-            c1, c2 = mid, bottom
+            c1, c2 = bg_mid, bg_bottom
         col = tuple(int(c1[i] + (c2[i] - c1[i]) * k) for i in range(3)) + (255,)
         draw.line((0, y, width, y), fill=col)
 
-    overlays = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    od = ImageDraw.Draw(overlays, "RGBA")
-    for idx, x0 in enumerate((-520, -120, 340, 760, 1180)):
-        alpha = 34 + (idx % 3) * 6
-        od.polygon([(x0, 0), (x0 + 220, 0), (x0 + height + 220, height), (x0 + height, height)], fill=(120, 0, 12, alpha))
-    image.alpha_composite(overlays)
+    diag = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    dd = ImageDraw.Draw(diag, "RGBA")
+    diag_colors = [
+        _hex_rgba("#7A000D", 38),
+        _hex_rgba("#4A0008", 30),
+        _hex_rgba("#300004", 46),
+    ]
+    for i, x0 in enumerate((-560, -190, 190, 560, 940)):
+        c = diag_colors[i % len(diag_colors)]
+        dd.polygon([(x0, 0), (x0 + 240, 0), (x0 + height + 240, height), (x0 + height, height)], fill=c)
+    image.alpha_composite(diag)
 
-    glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow, "RGBA")
-    gd.ellipse((width // 2 - 560, height // 2 - 250, width // 2 + 560, height // 2 + 250), fill=(255, 179, 71, 46))
-    gd.ellipse((130, 80, 860, 620), fill=(179, 18, 23, 34))
-    gd.ellipse((850, 70, 1550, 560), fill=(179, 18, 23, 30))
-    glow = glow.filter(ImageFilter.GaussianBlur(36))
-    image.alpha_composite(glow)
+    central = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    cd = ImageDraw.Draw(central, "RGBA")
+    cd.ellipse((width // 2 - 760, height // 2 - 420, width // 2 + 760, height // 2 + 420), fill=_hex_rgba("#FFB347", 46))
+    central = central.filter(ImageFilter.GaussianBlur(140))
+    image.alpha_composite(central)
+
+    reds = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    rd = ImageDraw.Draw(reds, "RGBA")
+    rd.ellipse((80, 90, 780, 580), fill=_hex_rgba("#B31217", 34))
+    rd.ellipse((880, 120, 1560, 620), fill=_hex_rgba("#B31217", 32))
+    rd.ellipse((420, height - 420, 1220, height + 40), fill=_hex_rgba("#B31217", 38))
+    reds = reds.filter(ImageFilter.GaussianBlur(120))
+    image.alpha_composite(reds)
+
+    flares = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    fd = ImageDraw.Draw(flares, "RGBA")
+    for y in (220, 390, 560):
+        fd.rounded_rectangle((width // 2 - 320, y, width // 2 + 320, y + 3), radius=2, fill=_hex_rgba("#FFB347", 70))
+    flares = flares.filter(ImageFilter.GaussianBlur(8))
+    image.alpha_composite(flares)
 
     particles = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     pd = ImageDraw.Draw(particles, "RGBA")
     rng = random.Random(2403)
-    for _ in range(180):
+    for _ in range(max(200, (width * height) // 12000)):
         x = rng.randint(0, width - 1)
         y = rng.randint(0, height - 1)
-        r = rng.randint(1, 3)
-        pd.ellipse((x - r, y - r, x + r, y + r), fill=(255, 210, 120, rng.randint(40, 120)))
+        r = rng.randint(2, 4)
+        clr = _hex_rgba("#FFD98A", rng.randint(38, 62)) if rng.random() < 0.6 else _hex_rgba("#FFB347", rng.randint(40, 64))
+        pd.ellipse((x - r, y - r, x + r, y + r), fill=clr)
     image.alpha_composite(particles)
 
 
-def draw_runrate(draw, x: int, y: int, ratio: float | None):
-    seg_w = 14
-    seg_h = 18
-    gap = 5
-    max_seg = 8
-    fill_count = 0
-    if ratio is not None:
-        fill_count = max(0, min(max_seg, int(round(float(ratio) * max_seg / 2))))
-    for i in range(max_seg):
-        sx = x + i * (seg_w + gap)
-        color = (248, 203, 92, 230) if i < fill_count else (110, 60, 40, 160)
-        draw.rounded_rectangle((sx, y, sx + seg_w, y + seg_h), radius=4, fill=color)
+def draw_runrate(image, draw, x: int, y: int, w: int, ratio: float | None):
+    from PIL import Image, ImageDraw, ImageFilter
+
+    h = 16
+    r = 8
+    track = _hex_rgba("#2A120E", 210)
+    border = _hex_rgba("#FFD98A", 64)
+    draw.rounded_rectangle((x, y, x + w, y + h), radius=r, fill=track, outline=border, width=1)
+
+    half = w // 2
+    grad = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(grad, "RGBA")
+
+    left_a = _hex_rgba("#8E1B1B", 220)
+    left_b = _hex_rgba("#C93A2F", 230)
+    for i in range(half):
+        t = i / max(half - 1, 1)
+        c = tuple(int(left_a[j] + (left_b[j] - left_a[j]) * t) for j in range(4))
+        gd.line((i, 0, i, h), fill=c)
+
+    right_a = _hex_rgba("#3BAA57", 220)
+    right_b = _hex_rgba("#6AE08B", 230)
+    for i in range(half, w):
+        t = (i - half) / max(w - half - 1, 1)
+        c = tuple(int(right_a[j] + (right_b[j] - right_a[j]) * t) for j in range(4))
+        gd.line((i, 0, i, h), fill=c)
+
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w, h), radius=r, fill=255)
+    image.paste(grad, (x, y), mask)
+
+    cx = x + half
+    draw.rounded_rectangle((cx - 1, y - 3, cx + 2, y + h + 3), radius=2, fill=_hex_rgba("#E7B35A", 235))
+
+    if ratio is None:
+        return
+
+    rr = max(0.0, min(2.0, float(ratio)))
+    marker_x = int(x + (rr / 2.0) * w)
+    mk_color = _hex_rgba("#D38D4A", 240) if rr < 1.0 else _hex_rgba("#6AE08B", 245)
+    glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    gdraw = ImageDraw.Draw(glow, "RGBA")
+    gdraw.ellipse((marker_x - 9, y - 1, marker_x + 9, y + h + 1), fill=(mk_color[0], mk_color[1], mk_color[2], 110))
+    glow = glow.filter(ImageFilter.GaussianBlur(6))
+    image.alpha_composite(glow)
+    draw.ellipse((marker_x - 7, y + 1, marker_x + 7, y + h - 1), fill=mk_color, outline=_hex_rgba("#FFD98A", 220), width=1)
 
 
 def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
         return None
 
-    from PIL import Image, ImageDraw, ImageFont, ImageOps
+    from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
 
     canvas_width = 1600
     top_padding = 60
     bottom_padding = 70
+    left_padding = 80
+    right_padding = 80
     title_block_height = 190
     header_block_height = 90
     row_height = 122
     row_gap = 22
+
     header_y = 245
-    rows_start_y = header_y + header_block_height + 26
+    header_h = 64
+    header_radius = 16
+    rows_start_y = header_y + header_h + 34
+
+    header_tabs = [
+        (80, 150, "МЕСТО"),
+        (250, 460, "СОТРУДНИК"),
+        (740, 290, "СРЕДНЕЕ В ЧАС ₽/ч"),
+        (1050, 210, "РАНРЕЙТ"),
+        (1280, 240, "ИТОГ"),
+    ]
 
     row_x = 80
     row_w = 1440
-    avatar_x = 235
+    row_h = 122
+    row_radius = 16
+
+    rank_block_x_offset = 16
+    rank_block_w = 125
+    rank_block_h = row_h - 24
+    avatar_x = 215
     avatar_size = 72
-    name_x = 330
-    name_w = 430
-    avg_hour_x = 860
-    runrate_x = 1070
-    total_x = 1305
+    name_x = 315
+    name_y_offset = 31
+    name_w = 360
+    avg_x = 820
+    avg_y_offset = 34
+    runrate_x = 1035
+    runrate_y_offset = 52
+    runrate_w = 170
+    total_x = 1265
+    total_y_offset = 18
+    total_w = 210
+    total_h = 70
 
     users_count = len(decade_leaders)
-    canvas_height = top_padding + title_block_height + header_block_height + 26 + users_count * row_height + max(users_count - 1, 0) * row_gap + bottom_padding
+    canvas_height = top_padding + title_block_height + header_block_height + 34 + users_count * row_height + max(users_count - 1, 0) * row_gap + bottom_padding
 
     img = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img, "RGBA")
@@ -4272,74 +4356,163 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
     title_font = _load_rank_font(ImageFont, 92)
     subtitle_font = _load_rank_font(ImageFont, 36)
     header_font = _load_rank_font(ImageFont, 26)
-    rank_font = _load_rank_font(ImageFont, 44)
-    name_font = _load_rank_font(ImageFont, 38)
-    avg_font = _load_rank_font(ImageFont, 40)
-    total_font = _load_rank_font(ImageFont, 44)
+    rank_font = _load_rank_font(ImageFont, 48)
+    name_font = _load_rank_font(ImageFont, 40)
+    avg_font = _load_rank_font(ImageFont, 42)
+    runrate_label_font = _load_rank_font(ImageFont, 18)
+    total_font = _load_rank_font(ImageFont, 46)
+    cup_font = _load_rank_font(ImageFont, 34)
+    initials_font = _load_rank_font(ImageFont, 30)
+
+    text_main = _hex_rgba("#FFF1D2")
+    gold_main = _hex_rgba("#FFD98A")
+    gold_mid = _hex_rgba("#F5C76A")
+    gold_dim = _hex_rgba("#E7B35A")
+    panel_border = _hex_rgba("#D7A04A", 225)
 
     title = "LEADERBOARD"
     tw = draw.textbbox((0, 0), title, font=title_font)
-    draw.text(((canvas_width - (tw[2]-tw[0]))/2, 72), title, fill=(255, 215, 120, 255), font=title_font)
-    sub = decade_title
-    sw = draw.textbbox((0, 0), sub, font=subtitle_font)
-    draw.text(((canvas_width - (sw[2]-sw[0]))/2, 164), sub, fill=(255, 238, 200, 230), font=subtitle_font)
+    draw.text(((canvas_width - (tw[2] - tw[0])) / 2, 70), title, fill=text_main, font=title_font)
+    sw = draw.textbbox((0, 0), decade_title, font=subtitle_font)
+    draw.text(((canvas_width - (sw[2] - sw[0])) / 2, 150), decade_title, fill=gold_mid, font=subtitle_font)
     lx1 = (canvas_width - 420) // 2
-    lx2 = lx1 + 420
-    draw.line((lx1, 214, lx2, 214), fill=(255, 196, 85, 230), width=3)
-    draw.ellipse((canvas_width//2-12, 206, canvas_width//2+12, 230), fill=(255, 210, 120, 180))
+    ly = 205
+    draw.rectangle((lx1, ly, lx1 + 420, ly + 3), fill=gold_dim)
+    draw.ellipse((canvas_width // 2 - 8, ly - 6, canvas_width // 2 + 8, ly + 10), fill=_hex_rgba("#FFB347", 210))
 
-    headers = [(120, "МЕСТО"), (330, "СОТРУДНИК"), (810, "СРЕДНЕЕ В ЧАС ₽/ч"), (1305, "ИТОГ")]
-    for x, txt in headers:
-        draw.text((x, header_y + 26), txt, fill=(255, 224, 160, 220), font=header_font)
+    def _draw_header_tab(x: int, w: int, text: str):
+        tab = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        td = ImageDraw.Draw(tab, "RGBA")
+        top_c = _hex_rgba("#4A0008", 235)
+        bot_c = _hex_rgba("#210203", 235)
+        for yy in range(header_h):
+            t = yy / max(header_h - 1, 1)
+            col = tuple(int(top_c[i] + (bot_c[i] - top_c[i]) * t) for i in range(4))
+            td.line((x, header_y + yy, x + w, header_y + yy), fill=col)
+        td.rounded_rectangle((x, header_y, x + w, header_y + header_h), radius=header_radius, outline=_hex_rgba("#B97B2C", 220), width=2)
+        img.alpha_composite(tab)
+        b = draw.textbbox((0, 0), text, font=header_font)
+        tx = x + (w - (b[2] - b[0])) / 2
+        ty = header_y + (header_h - (b[3] - b[1])) / 2 - 1
+        draw.text((tx, ty), text, fill=gold_mid, font=header_font)
+
+    for x, w, txt in header_tabs:
+        _draw_header_tab(x, w, txt)
 
     avatars = top3_avatars or {}
-    highlight_norm = (highlight_name or "").strip().lower()
-    for i, row in enumerate(decade_leaders, start=1):
-        y = rows_start_y + (i - 1) * (row_height + row_gap)
-        row_fill = (60, 14, 16, 185) if i % 2 else (45, 10, 14, 170)
-        draw.rounded_rectangle((row_x, y, row_x + row_w, y + row_height), radius=24, fill=row_fill, outline=(173, 74, 40, 150), width=2)
+    for place, row in enumerate(decade_leaders, start=1):
+        row_y = rows_start_y + (place - 1) * (row_h + row_gap)
 
-        chevron = [(row_x + 24, y + row_height // 2), (row_x + 62, y + 26), (row_x + 62, y + row_height - 26)]
-        draw.polygon(chevron, fill=(180, 52, 30, 220))
-        draw.text((row_x + 70, y + 34), f"#{i}", fill=(255, 225, 150, 255), font=rank_font)
-        if i <= 3:
-            draw.text((row_x + 146, y + 30), "🏆", fill=(255, 223, 120, 255), font=header_font)
+        # row shadow + glow
+        shadow = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        sd = ImageDraw.Draw(shadow, "RGBA")
+        sd.rounded_rectangle((row_x + 2, row_y + 6, row_x + row_w + 4, row_y + row_h + 8), radius=row_radius, fill=(0, 0, 0, 128))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(12))
+        img.alpha_composite(shadow)
+
+        row_img = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        rd = ImageDraw.Draw(row_img, "RGBA")
+        p_top = _hex_rgba("#4A0008", 230)
+        p_mid = _hex_rgba("#300004", 228)
+        p_bot = _hex_rgba("#1D0002", 228)
+        for yy in range(row_h):
+            t = yy / max(row_h - 1, 1)
+            if t <= 0.5:
+                k = t / 0.5
+                c1, c2 = p_top, p_mid
+            else:
+                k = (t - 0.5) / 0.5
+                c1, c2 = p_mid, p_bot
+            col = tuple(int(c1[i] + (c2[i] - c1[i]) * k) for i in range(4))
+            rd.line((row_x, row_y + yy, row_x + row_w, row_y + yy), fill=col)
+        rd.rounded_rectangle((row_x, row_y, row_x + row_w, row_y + row_h), radius=row_radius, outline=panel_border, width=2)
+        rd.rectangle((row_x + 14, row_y + 6, row_x + row_w - 14, row_y + 14), fill=_hex_rgba("#FFDC8C", 24))
+        rd.ellipse((row_x + row_w // 2 - 120, row_y + 44, row_x + row_w // 2 + 120, row_y + 78), fill=_hex_rgba("#FFB347", 55))
+        row_img = row_img.filter(ImageFilter.GaussianBlur(1))
+        img.alpha_composite(row_img)
+
+        if place <= 3:
+            glow_color = "#FFD98A" if place == 1 else ("#D9D9D9" if place == 2 else "#C27A3A")
+            g = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            gd = ImageDraw.Draw(g, "RGBA")
+            alpha = 72 if place == 1 else (42 if place == 2 else 36)
+            gd.rounded_rectangle((row_x - 2, row_y - 2, row_x + row_w + 2, row_y + row_h + 2), radius=row_radius + 2, outline=_hex_rgba(glow_color, alpha), width=3)
+            g = g.filter(ImageFilter.GaussianBlur(9 if place == 1 else 6))
+            img.alpha_composite(g)
+
+        rank_x = row_x + rank_block_x_offset
+        rank_y = row_y + 12
+        chevron = [
+            (rank_x, rank_y),
+            (rank_x + rank_block_w - 24, rank_y),
+            (rank_x + rank_block_w, rank_y + rank_block_h // 2),
+            (rank_x + rank_block_w - 24, rank_y + rank_block_h),
+            (rank_x, rank_y + rank_block_h),
+            (rank_x + 14, rank_y + rank_block_h // 2),
+        ]
+        draw.polygon(chevron, fill=_hex_rgba("#4A0008", 240), outline=panel_border)
+
+        rank_color = gold_main if place == 1 else (_hex_rgba("#D9D9D9") if place == 2 else (_hex_rgba("#C27A3A") if place == 3 else text_main))
+        draw.text((rank_x + 20, rank_y + 22), f"#{place}", fill=rank_color, font=rank_font)
+        if place <= 3:
+            draw.text((rank_x + 84, rank_y + 20), "🏆", fill=rank_color, font=cup_font)
 
         name_raw = str(row.get("name", "—"))
-        me = bool(highlight_norm and name_raw.strip().lower() == highlight_norm)
-
         av = avatars.get(int(row.get("telegram_id") or 0))
+        av_y = row_y + 25
         if av is None:
-            av = Image.new("RGBA", (avatar_size, avatar_size), (88, 38, 28, 255))
-            avd = ImageDraw.Draw(av)
-            avd.text((18, 22), _initials(name_raw), fill=(255, 236, 197, 255), font=_load_rank_font(ImageFont, 28))
+            av = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
+            avd = ImageDraw.Draw(av, "RGBA")
+            for yy in range(avatar_size):
+                t = yy / max(avatar_size - 1, 1)
+                c1 = _hex_rgba("#4A0008")
+                c2 = _hex_rgba("#1D0002")
+                cc = tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3)) + (255,)
+                avd.line((0, yy, avatar_size, yy), fill=cc)
+            ib = avd.textbbox((0, 0), _initials(name_raw), font=initials_font)
+            avd.text(((avatar_size - (ib[2] - ib[0])) / 2, (avatar_size - (ib[3] - ib[1])) / 2 - 1), _initials(name_raw), fill=text_main, font=initials_font)
         else:
             try:
                 av = av.convert("RGBA")
             except Exception:
-                av = Image.new("RGBA", (avatar_size, avatar_size), (88, 38, 28, 255))
+                av = Image.new("RGBA", (avatar_size, avatar_size), _hex_rgba("#300004"))
+
         av = ImageOps.fit(av, (avatar_size, avatar_size), method=Image.Resampling.LANCZOS)
         mask = Image.new("L", (avatar_size, avatar_size), 0)
         ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
-        img.paste(av, (avatar_x, y + 25), mask)
-        border = (255, 214, 120, 255) if i <= 3 else (198, 130, 94, 220)
-        draw.ellipse((avatar_x - 3, y + 22, avatar_x + avatar_size + 3, y + 25 + avatar_size + 3), outline=border, width=4)
+        img.paste(av, (avatar_x, av_y), mask)
+        av_border = gold_main if place == 1 else (_hex_rgba("#D9D9D9") if place == 2 else (_hex_rgba("#C27A3A") if place == 3 else panel_border))
+        draw.ellipse((avatar_x - 3, av_y - 3, avatar_x + avatar_size + 3, av_y + avatar_size + 3), outline=av_border, width=3)
 
         name_text = _truncate_to_width(draw, name_raw, name_font, name_w)
-        draw.text((name_x, y + 25), name_text, fill=(255, 245, 225, 255) if me else (248, 231, 205, 245), font=name_font)
+        draw.text((name_x, row_y + name_y_offset), name_text, fill=text_main, font=name_font)
 
         avg_text = "—"
         if float(row.get("total_hours") or 0) > 0:
-            avg_text = f"{format_money(int(row.get('avg_per_hour') or 0))}"
-        draw.text((avg_hour_x, y + 26), avg_text, fill=(255, 228, 170, 255), font=avg_font)
-        draw_runrate(draw, runrate_x, y + 74, row.get("run_rate"))
+            avg_text = f"{int(row.get('avg_per_hour') or 0)} ₽"
+        draw.text((avg_x, row_y + avg_y_offset), avg_text, fill=_hex_rgba("#F7D38C"), font=avg_font)
 
-        total_text = f"{format_money(int(row.get('total_amount') or 0))}"
-        total_fill = (115, 20, 14, 230)
-        if i == 1:
-            draw.rounded_rectangle((total_x - 18, y + 10, total_x + 250, y + 98), radius=20, fill=(255, 184, 78, 35))
-        draw.rounded_rectangle((total_x - 10, y + 20, total_x + 240, y + 92), radius=18, fill=total_fill, outline=(255, 192, 96, 170), width=2)
-        draw.text((total_x + 12, y + 34), total_text, fill=(255, 222, 150, 255), font=total_font)
+        draw.text((runrate_x, row_y + 20), "РАНРЕЙТ", fill=gold_dim, font=runrate_label_font)
+        rr = row.get("run_rate")
+        if rr is None:
+            dash_font = _load_rank_font(ImageFont, 34)
+            db = draw.textbbox((0, 0), "—", font=dash_font)
+            draw.text((runrate_x + (runrate_w - (db[2] - db[0])) / 2, row_y + runrate_y_offset - 10), "—", fill=_hex_rgba("#CBAE7A"), font=dash_font)
+        else:
+            draw_runrate(img, draw, runrate_x, row_y + runrate_y_offset, runrate_w, rr)
+
+        total_text = format_money(int(row.get("total_amount") or 0))
+        tb = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        tbd = ImageDraw.Draw(tb, "RGBA")
+        tbd.rounded_rectangle((total_x, row_y + total_y_offset, total_x + total_w, row_y + total_y_offset + total_h), radius=12, fill=_hex_rgba("#3A0B0B", 240), outline=gold_main, width=2)
+        tbd.rounded_rectangle((total_x + 4, row_y + total_y_offset + 4, total_x + total_w - 4, row_y + total_y_offset + 18), radius=8, fill=_hex_rgba("#FFD778", 20))
+        if place == 1:
+            tbd.rounded_rectangle((total_x - 6, row_y + total_y_offset - 4, total_x + total_w + 6, row_y + total_y_offset + total_h + 4), radius=14, outline=_hex_rgba("#FFD98A", 88), width=2)
+            tb = tb.filter(ImageFilter.GaussianBlur(1))
+        img.alpha_composite(tb)
+
+        tt = draw.textbbox((0, 0), total_text, font=total_font)
+        draw.text((total_x + (total_w - (tt[2] - tt[0])) / 2, row_y + total_y_offset + (total_h - (tt[3] - tt[1])) / 2 - 4), total_text, fill=text_main, font=total_font)
 
     out = BytesIO()
     out.name = "leaderboard.png"
