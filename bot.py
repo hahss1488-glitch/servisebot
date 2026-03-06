@@ -62,6 +62,7 @@ from ui.glass_ui import (
     get_font,
     get_type_font,
     truncate_text_to_width,
+    fit_text_to_width,
 )
 
 # Настройка логирования
@@ -1020,7 +1021,7 @@ def _build_open_dashboard_payload(user_id: int, shift: dict, cars: list[dict], t
     shifts_done = DatabaseManager.get_shifts_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
     cars_done = DatabaseManager.get_cars_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
     avg_check = int(earned / cars_done) if cars_done else 0
-    decade_progress = max(0.0, min(1.0, earned / goal)) if goal > 0 else None
+    completion_percent = max(0.0, min(1.0, earned / goal)) if goal > 0 else None
     pace_text, pace_color, pace_delta = _compute_pace_metric(
         user_id,
         start_d,
@@ -1048,7 +1049,8 @@ def _build_open_dashboard_payload(user_id: int, shift: dict, cars: list[dict], t
         "decade_title": f"{title} · {format_decade_range(start_d, end_d)}",
         "decade_earned": earned,
         "decade_goal": goal,
-        "decade_progress": decade_progress,
+        "decade_progress": completion_percent,
+        "completion_percent": completion_percent,
         "decade_metrics": [
             ("Осталось", format_money_glass(int(p.get("remaining") or 0)), TOKENS["TEXT_PRIMARY"]),
             ("Осталось смен", str(int(p.get("work_units_left") or 0)), TOKENS["TEXT_PRIMARY"]),
@@ -1072,7 +1074,7 @@ def _build_closed_dashboard_payload(user_id: int) -> dict:
     _, start_d, end_d, _, title = get_decade_period(today)
     earned = int(p.get("earned_decade") or 0)
     goal = int(p.get("decade_goal") or 0)
-    progress = max(0.0, min(1.0, earned / goal)) if goal > 0 else None
+    completion_percent = max(0.0, min(1.0, earned / goal)) if goal > 0 else None
     pace_text, pace_color, pace_delta = _compute_pace_metric(user_id, start_d, end_d, goal, earned, int(p.get("work_units_total") or 0), active_shift_started=False)
     delta = int(p.get("delta") or 0)
     shifts_done = DatabaseManager.get_shifts_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
@@ -1082,7 +1084,8 @@ def _build_closed_dashboard_payload(user_id: int) -> dict:
         "decade_title": f"{title} · {format_decade_range(start_d, end_d)}",
         "earned": earned,
         "goal": goal,
-        "progress": progress,
+        "progress": completion_percent,
+        "completion_percent": completion_percent,
         "pace_text": pace_text,
         "pace_color": pace_color,
         "metrics": [
@@ -4526,122 +4529,105 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
         return None
     from PIL import ImageDraw
 
-    width = 1600
-    margin_x, top_margin, bottom_margin = 72, 60, 64
-    header_h = 180
-    podium_top = top_margin + header_h + 34
-    podium_bottom = podium_top + 426
-    rest = decade_leaders[3:]
-    row_h = 78
-    row_gap = 10
-    lower_h = (26 * 2 + len(rest) * row_h + max(0, len(rest) - 1) * row_gap) if rest else 0
-    footer_h = 56 if 1 <= len(rest) <= 2 else 0
-    height = podium_bottom + 30 + lower_h + (14 if footer_h else 0) + footer_h + bottom_margin
-
+    width, height = 1600, 900
+    margin = 56
     bg = create_aurora_background(width, height, seed=120)
     canvas = bg.copy()
     draw = ImageDraw.Draw(canvas, "RGBA")
 
-    header = (margin_x, top_margin, width - margin_x, top_margin + header_h)
-    draw_glass_card(canvas, bg, header, radius=40, material_level="hero", glow_color=(99, 224, 255), glow_strength=92)
-    hx1, hy1, hx2, _ = header
-    draw.text((hx1 + 40, hy1 + 26), "ЛИДЕРБОРД", fill=TOKENS["TEXT_PRIMARY"], font=get_type_font("SCREEN_TITLE"))
-    subtitle = truncate_text_to_width(draw, decade_title or "—", get_type_font("SECTION_TITLE"), 860)
-    draw.text((hx1 + 40, hy1 + 98), subtitle, fill=TOKENS["TEXT_SECONDARY"], font=get_type_font("SECTION_TITLE"))
-    draw_divider_glow(canvas, hx1 + 40, hx1 + 590, hy1 + 146)
-    draw_glass_pill(canvas, bg, (hx2 - 270, hy1 + 38, hx2 - 36, hy1 + 84), "Top Heroes", get_type_font("CHIP_TEXT"), TOKENS["TEXT_SECONDARY"])
+    header = (margin, 52, width - margin, 190)
+    draw_glass_card(canvas, bg, header, radius=32, material_level="hero", glow_color=(104, 212, 255), glow_strength=78)
+    hx1, hy1, hx2, hy2 = header
+    draw.text((hx1 + 34, hy1 + 20), "ЛИДЕРБОРД", fill=TOKENS["TEXT_PRIMARY"], font=get_font(58, True))
+    subtitle, subtitle_font = fit_text_to_width(decade_title or "1-я декада", None, 34, 22, 840, ellipsis=True, bold=True)
+    draw.text((hx1 + 34, hy1 + 84), subtitle, fill=TOKENS["TEXT_SECONDARY"], font=subtitle_font)
+    draw_glass_pill(canvas, bg, (hx2 - 290, hy1 + 42, hx2 - 34, hy1 + 92), "Top Heroes", get_font(24, True), TOKENS["TEXT_PRIMARY"])
+    draw_divider_glow(canvas, hx1 + 34, hx1 + 470, hy2 - 18)
 
-    cards = [
-        (2, (72, podium_top + 66, 512, podium_top + 408), 124),
-        (1, (508, podium_top, 1092, podium_top + 426), 164),
-        (3, (1088, podium_top + 66, 1528, podium_top + 408), 124),
-    ]
+    top_y = hy2 + 34
+    top_cards = {
+        2: (margin, top_y + 56, margin + 430, top_y + 341, 96),
+        1: (margin + 414, top_y, margin + 1074, top_y + 340, 116),
+        3: (width - margin - 430, top_y + 56, width - margin, top_y + 341, 96),
+    }
     leaders = {i + 1: row for i, row in enumerate(decade_leaders[:3])}
     avatars = top3_avatars or {}
 
-    for place, bbox, av_size in cards:
+    for place in (2, 1, 3):
         row = leaders.get(place)
         if not row:
             continue
-        x1, y1, x2, y2 = bbox
-        draw_glass_card(
-            canvas,
-            bg,
-            bbox,
-            radius=40 if place == 1 else 34,
-            material_level="hero" if place == 1 else "primary",
-            border_bright=(place == 1),
-            glow_color=(109, 193, 255) if place == 1 else (120, 162, 255),
-            glow_strength=110 if place == 1 else 48,
-        )
-        if place == 1:
-            from ui.glass_ui import draw_glow
-            draw_glow(canvas, (x1 - 22, y1 - 24, x2 + 22, y2 + 24), (124, 134, 255, 70), blur=46, expand=18)
-
-        draw_rank_badge(canvas, bg, (x1 + 24, y1 + 20, x1 + 128, y1 + 62), place)
+        x1, y1, x2, y2, av_size = top_cards[place]
+        draw_glass_card(canvas, bg, (x1, y1, x2, y2), radius=34 if place == 1 else 28, material_level="hero" if place == 1 else "primary", border_bright=(place == 1), glow_color=(118, 137, 255) if place == 1 else (95, 186, 255), glow_strength=84 if place == 1 else 42)
+        draw_rank_badge(canvas, bg, (x1 + 20, y1 + 18, x1 + 104, y1 + 58), place)
 
         avatar = avatars.get(_safe_int(row.get("telegram_id")))
         av_x = x1 + ((x2 - x1) - av_size) // 2
-        av_y = y1 + (80 if place == 1 else 74)
+        av_y = y1 + (56 if place == 1 else 48)
         draw_avatar_circle(canvas, (av_x, av_y, av_x + av_size, av_y + av_size), avatar, str(row.get("name", "—")))
 
-        name_top = av_y + av_size + 14
-        amount_y = y2 - (156 if place == 1 else 144)
-        chips_y1, chips_y2 = y2 - 58, y2 - 20
-        max_name_h = max(44, amount_y - 12 - name_top)
-        lines, name_font, line_h = _fit_name_lines(draw, str(row.get("name", "—")), (x2 - x1) - 74, 2, 42 if place == 1 else 33, 24)
-        name_block_h = min(max_name_h, len(lines) * line_h + (len(lines) - 1) * 6)
-        name_y = name_top + max(0, (max_name_h - name_block_h) // 2)
-        for i, line in enumerate(lines):
-            lb = draw.textbbox((0, 0), line, font=name_font)
-            draw.text((x1 + ((x2 - x1) - (lb[2] - lb[0])) / 2, name_y + i * (line_h + 6)), line, fill=TOKENS["TEXT_PRIMARY"], font=name_font)
+        name_y = av_y + av_size + 18
+        name_w = (x2 - x1) - 50
+        name, name_font = fit_text_to_width(str(row.get("name", "—")), None, 40 if place == 1 else 31, 22, name_w, ellipsis=True, bold=True)
+        nb = draw.textbbox((0, 0), name, font=name_font)
+        draw.text((x1 + ((x2 - x1) - (nb[2] - nb[0])) / 2, name_y), name, fill=TOKENS["TEXT_PRIMARY"], font=name_font)
 
         amount = format_money_glass(_safe_int(row.get("total_amount")))
-        amount_font = get_font(76 if place == 1 else 50, bold=True)
+        amount_font = get_font(56 if place == 1 else 42, True)
         ab = draw.textbbox((0, 0), amount, font=amount_font)
+        amount_y = name_y + (nb[3] - nb[1]) + 14
         draw.text((x1 + ((x2 - x1) - (ab[2] - ab[0])) / 2, amount_y), amount, fill=TOKENS["TEXT_PRIMARY"], font=amount_font)
 
-        avg = f"{_safe_int(row.get('avg_per_hour'))} ₽/ч" if _safe_float(row.get("total_hours")) and _safe_float(row.get("total_hours")) > 0 else "—"
+        avg_raw = _safe_float(row.get("total_hours"))
+        avg = f"{_safe_int(row.get('avg_per_hour'))} ₽/ч" if avg_raw and avg_raw > 0 else "—"
         rr_text, rr_color = format_runrate(_safe_float(row.get("run_rate")))
         chips = [(f"Avg/ч {avg}", TOKENS["TEXT_SECONDARY"]), (f"Tempo {rr_text}", rr_color), (f"Смены {_safe_int(row.get('shifts_count'))}", TOKENS["TEXT_SECONDARY"])]
-        chip_w = 162 if place == 1 else 132
+        chips_y1, chips_y2 = y2 - 52, y2 - 18
         gap = 10
-        total_w = len(chips) * chip_w + (len(chips) - 1) * gap
-        cx = x1 + ((x2 - x1) - total_w) // 2
+        chip_w = ((x2 - x1) - 38 - gap * 2) // 3
         for i, (txt, color) in enumerate(chips):
-            px1 = cx + i * (chip_w + gap)
-            pill_text = truncate_text_to_width(draw, txt, get_font(19, True), chip_w - 20)
-            draw_glass_pill(canvas, bg, (px1, chips_y1, px1 + chip_w, chips_y2), pill_text, get_font(19, True), color)
+            px1 = x1 + 19 + i * (chip_w + gap)
+            pill_text, pill_font = fit_text_to_width(txt, None, 19 if place == 1 else 16, 14, chip_w - 12, ellipsis=True, bold=True)
+            draw_glass_pill(canvas, bg, (px1, chips_y1, px1 + chip_w, chips_y2), pill_text, pill_font, color)
 
-    lower_y = podium_bottom + 30
-    if rest:
-        lower_box = (margin_x, lower_y, width - margin_x, lower_y + lower_h)
-        draw_glass_card(canvas, bg, lower_box, radius=30, material_level="primary", glow_color=(96, 178, 255), glow_strength=34)
-        y = lower_y + 26
-        for idx, row in enumerate(rest, start=4):
-            is_me = bool(highlight_name and str(row.get("name", "")).strip().lower() == str(highlight_name).strip().lower())
-            row_box = (margin_x + 18, y, width - margin_x - 18, y + row_h)
-            draw_glass_card(canvas, bg, row_box, radius=24, material_level="metric", border_bright=is_me, glow_color=(98, 214, 255) if is_me else None, glow_strength=42 if is_me else 0)
-            x1, y1, x2, y2 = row_box
-            draw_rank_badge(canvas, bg, (x1 + 14, y1 + 18, x1 + 92, y2 - 18), idx)
-            draw_avatar_circle(canvas, (x1 + 108, y1 + 12, x1 + 162, y2 - 12), None, str(row.get("name", "—")))
-            name = truncate_text_to_width(draw, str(row.get("name", "—")), get_font(28, True), 330)
-            draw.text((x1 + 178, y1 + 24), name, fill=TOKENS["TEXT_PRIMARY"], font=get_font(28, True))
-            avg = f"{_safe_int(row.get('avg_per_hour'))} ₽/ч" if _safe_float(row.get("total_hours")) and _safe_float(row.get("total_hours")) > 0 else "—"
-            draw.text((x1 + 550, y1 + 28), avg, fill=TOKENS["TEXT_SECONDARY"], font=get_font(24, False))
-            rr_text, rr_color = format_runrate(_safe_float(row.get("run_rate")))
-            draw_glass_pill(canvas, bg, (x1 + 720, y1 + 20, x1 + 908, y1 + 58), f"Tempo {rr_text}", get_font(19, True), rr_color)
-            shifts = str(_safe_int(row.get("shifts_count")))
-            draw.text((x1 + 952, y1 + 28), f"Смены {shifts}", fill=TOKENS["TEXT_MUTED"], font=get_font(22, False))
-            total = format_money_glass(_safe_int(row.get("total_amount")))
-            tb = draw.textbbox((0, 0), total, font=get_font(36, True))
-            draw.text((x2 - 20 - (tb[2] - tb[0]), y1 + 23), total, fill=TOKENS["TEXT_PRIMARY"], font=get_font(36, True))
-            y += row_h + row_gap
+    rows = decade_leaders[3:]
+    row_h = 92
+    row_gap = 10
+    rows_top = top_y + 366
+    max_rows = max(0, (height - 56 - 54 - rows_top + row_gap) // (row_h + row_gap))
+    rows = rows[:max_rows]
 
-    if footer_h:
-        total_amount = sum(_safe_int(r.get("total_amount")) for r in decade_leaders)
-        footer_y = lower_y + lower_h + 16
-        draw_summary_footer(canvas, bg, (margin_x, footer_y, width - margin_x, footer_y + footer_h), [f"Участников: {len(decade_leaders)}", f"Общий объём: {format_money_glass(total_amount)}", "Обновлено сегодня"])
+    for offset, row in enumerate(rows, start=4):
+        y1 = rows_top + (offset - 4) * (row_h + row_gap)
+        y2 = y1 + row_h
+        is_me = bool(highlight_name and str(row.get("name", "")).strip().lower() == str(highlight_name).strip().lower())
+        row_box = (margin, y1, width - margin, y2)
+        draw_glass_card(canvas, bg, row_box, radius=24, material_level="metric", border_bright=is_me, glow_color=(95, 212, 255) if is_me else None, glow_strength=42 if is_me else 0)
+        x1, _, x2, _ = row_box
+
+        draw_rank_badge(canvas, bg, (x1 + 14, y1 + 24, x1 + 92, y1 + 68), offset)
+        draw_avatar_circle(canvas, (x1 + 104, y1 + 20, x1 + 156, y1 + 72), None, str(row.get("name", "—")))
+        name, name_font = fit_text_to_width(str(row.get("name", "—")), None, 30, 20, 300, ellipsis=True, bold=True)
+        draw.text((x1 + 170, y1 + 30), name, fill=TOKENS["TEXT_PRIMARY"], font=name_font)
+
+        avg_raw = _safe_float(row.get("total_hours"))
+        avg_txt = f"{_safe_int(row.get('avg_per_hour'))} ₽/ч" if avg_raw and avg_raw > 0 else "—"
+        draw.text((x1 + 500, y1 + 34), avg_txt, fill=TOKENS["TEXT_SECONDARY"], font=get_font(24, False))
+
+        rr_text, rr_color = format_runrate(_safe_float(row.get("run_rate")))
+        draw.text((x1 + 680, y1 + 34), f"Tempo {rr_text if rr_text else '—'}", fill=rr_color, font=get_font(24, True))
+
+        shifts_txt = str(_safe_int(row.get("shifts_count")))
+        draw.text((x1 + 900, y1 + 34), f"Смены {shifts_txt}", fill=TOKENS["TEXT_MUTED"], font=get_font(23, False))
+
+        total = format_money_glass(_safe_int(row.get("total_amount")))
+        total_font = get_font(34, True)
+        tb = draw.textbbox((0, 0), total, font=total_font)
+        draw.text((x2 - 24 - (tb[2] - tb[0]), y1 + 28), total, fill=TOKENS["TEXT_PRIMARY"], font=total_font)
+
+    footer_y = height - 56
+    total_amount = sum(_safe_int(r.get("total_amount")) for r in decade_leaders)
+    draw_summary_footer(canvas, bg, (margin, footer_y, width - margin, footer_y + 44), [f"Участников: {len(decade_leaders)}", f"Общий объём: {format_money_glass(total_amount)}", "Обновлено сегодня"])
 
     out = BytesIO()
     out.name = "leaderboard.png"
@@ -4655,19 +4641,19 @@ def _build_dashboard_image(mode: str, payload: dict) -> BytesIO | None:
         return None
     from PIL import ImageDraw
 
-    w, h = 1600, 1260
+    w, h = 1600, 900
     bg = create_aurora_background(w, h, seed=333 if mode == "open" else 444)
     canvas = bg.copy()
     draw = ImageDraw.Draw(canvas, "RGBA")
 
-    header = (72, 62, 1528, 214)
-    draw_glass_card(canvas, bg, header, radius=36, material_level="hero", glow_color=(105, 210, 255), glow_strength=82)
+    header = (56, 52, 1544, 182)
+    draw_glass_card(canvas, bg, header, radius=32, material_level="hero", glow_color=(105, 210, 255), glow_strength=72)
     hx1, hy1, hx2, _ = header
-    draw.text((hx1 + 36, hy1 + 30), "Дашборд", fill=TOKENS["TEXT_PRIMARY"], font=get_type_font("SCREEN_TITLE"))
-    subtitle = truncate_text_to_width(draw, payload.get("decade_title", ""), get_type_font("SECTION_TITLE"), 860)
-    draw.text((hx1 + 36, hy1 + 98), subtitle, fill=TOKENS["TEXT_SECONDARY"], font=get_type_font("SECTION_TITLE"))
+    draw.text((hx1 + 34, hy1 + 18), "Дашборд", fill=TOKENS["TEXT_PRIMARY"], font=get_font(56, True))
+    subtitle, subtitle_font = fit_text_to_width(payload.get("decade_title", "—"), None, 28, 20, 930, ellipsis=True, bold=True)
+    draw.text((hx1 + 34, hy1 + 84), subtitle, fill=TOKENS["TEXT_SECONDARY"], font=subtitle_font)
     status = "Смена активна" if mode == "open" else "Смена закрыта"
-    draw_glass_pill(canvas, bg, (hx2 - 274, hy1 + 42, hx2 - 36, hy1 + 86), status, get_type_font("CHIP_TEXT"), TOKENS["TEXT_PRIMARY"])
+    draw_glass_pill(canvas, bg, (hx2 - 300, hy1 + 38, hx2 - 34, hy1 + 90), status, get_font(23, True), TOKENS["TEXT_PRIMARY"])
 
     if mode == "open":
         _draw_open_dashboard(canvas, bg, payload)
@@ -4685,88 +4671,77 @@ def _draw_open_dashboard(canvas, bg, p: dict) -> None:
     from PIL import ImageDraw
 
     draw = ImageDraw.Draw(canvas, "RGBA")
-    panel = (72, 246, 1528, 1196)
-    draw_glass_card(canvas, bg, panel, radius=40, material_level="primary", glow_color=(106, 186, 255), glow_strength=58)
+    panel = (56, 214, 1544, 644)
+    draw_glass_card(canvas, bg, panel, radius=34, material_level="primary", glow_color=(106, 186, 255), glow_strength=56)
     x1, y1, x2, y2 = panel
 
-    draw.text((x1 + 44, y1 + 30), "Главный KPI", fill=TOKENS["TEXT_PRIMARY"], font=get_type_font("SECTION_TITLE"))
-    draw.text((x1 + 44, y1 + 76), f"Старт смены: {p.get('shift_start_label', '—')}", fill=TOKENS["TEXT_SECONDARY"], font=get_type_font("CAPTION"))
-    draw.text((x1 + 44, y1 + 120), format_money_glass(p.get("decade_earned")), fill=TOKENS["TEXT_PRIMARY"], font=get_type_font("KPI_XL"))
-    draw.text((x1 + 44, y1 + 224), f"из {format_money_glass(p.get('decade_goal')) if _safe_int(p.get('decade_goal')) > 0 else '—'}", fill=TOKENS["TEXT_SECONDARY"], font=get_type_font("METRIC_LABEL"))
+    draw.text((x1 + 34, y1 + 28), "Главный KPI", fill=TOKENS["TEXT_PRIMARY"], font=get_font(38, True))
+    period, period_font = fit_text_to_width(p.get("decade_title", "—"), None, 24, 18, 760, ellipsis=True)
+    draw.text((x1 + 34, y1 + 78), period, fill=TOKENS["TEXT_SECONDARY"], font=period_font)
 
-    bubble = (x2 - 356, y1 + 38, x2 - 44, y1 + 290)
-    draw_glass_card(canvas, bg, bubble, radius=56, material_level="hero", glow_color=(102, 236, 217), glow_strength=84, border_bright=True)
+    amount = format_money_glass(p.get("decade_earned"))
+    draw.text((x1 + 34, y1 + 124), amount, fill=TOKENS["TEXT_PRIMARY"], font=get_font(86, True))
+    goal_text = f"из {format_money_glass(p.get('decade_goal')) if _safe_int(p.get('decade_goal')) > 0 else '—'}"
+    draw.text((x1 + 34, y1 + 228), goal_text, fill=TOKENS["TEXT_SECONDARY"], font=get_font(34, False))
+
+    completion = p.get("completion_percent")
+    completion_int = int(round((completion or 0) * 100)) if completion is not None else 0
+    bubble = (x2 - 330, y1 + 34, x2 - 34, y1 + 254)
+    draw_glass_card(canvas, bg, bubble, radius=30, material_level="hero", glow_color=(102, 236, 217), glow_strength=82, border_bright=True)
     bx1, by1, bx2, by2 = bubble
-    draw.text((bx1 + 54, by1 + 58), "Tempo", fill=TOKENS["TEXT_MUTED"], font=get_type_font("METRIC_LABEL"))
-    draw.text((bx1 + 54, by1 + 108), p.get("pace_text", "—"), fill=p.get("pace_color", TOKENS["TEXT_SECONDARY"]), font=get_type_font("KPI_L"))
-    draw.text((bx1 + 54, by2 - 68), p.get("pace_delta_text", "—"), fill=TOKENS["TEXT_SECONDARY"], font=get_type_font("CAPTION"))
+    pct_text = f"{completion_int}%" if completion is not None else "—"
+    pb = draw.textbbox((0, 0), pct_text, font=get_font(72, True))
+    draw.text((bx1 + (bx2 - bx1 - (pb[2] - pb[0])) / 2, by1 + 24), pct_text, fill=TOKENS["TEXT_PRIMARY"], font=get_font(72, True))
+    draw.text((bx1 + 34, by1 + 112), "Выполнение", fill=TOKENS["TEXT_SECONDARY"], font=get_font(28, True))
+    draw.text((bx1 + 34, by1 + 152), f"Темп: {p.get('pace_text', '—')}", fill=p.get("pace_color", TOKENS["TEXT_SECONDARY"]), font=get_font(24, True))
+    delta_color = TOKENS["POSITIVE"] if "+" in str(p.get("pace_delta_text", "")) else TOKENS["NEGATIVE"]
+    if "—" in str(p.get("pace_delta_text", "")):
+        delta_color = TOKENS["TEXT_SECONDARY"]
+    draw.text((bx1 + 34, by1 + 184), p.get("pace_delta_text", "—"), fill=delta_color, font=get_font(21, False))
 
-    draw_progress_bar(canvas, (x1 + 44, y1 + 300, x2 - 44, y1 + 330), p.get("decade_progress"))
+    draw_progress_bar(canvas, (x1 + 34, y1 + 292, x2 - 34, y1 + 318), completion)
 
     metrics = p.get("decade_metrics", [])[:6]
-    card_w = 446
+    card_h, gap = 104, 18
+    card_w = (x2 - x1 - 68 - gap * 2) // 3
     for i, item in enumerate(metrics):
         col, row = i % 3, i // 3
-        bx = x1 + 44 + col * (card_w + 14)
-        by = y1 + 364 + row * 136
-        draw_metric_box(canvas, bg, (bx, by, bx + card_w, by + 120), item[0], item[1], item[2])
+        bx = x1 + 34 + col * (card_w + gap)
+        by = y1 + 336 + row * (card_h + gap)
+        draw_metric_box(canvas, bg, (bx, by, bx + card_w, by + card_h), item[0], item[1], item[2])
 
     mini = p.get("mini") or []
-    parsed_mini = []
+    parsed = []
     for item in mini[:3]:
         if ":" in str(item):
             k, v = str(item).split(":", 1)
-            parsed_mini.append((k.strip(), v.strip()))
-    while len(parsed_mini) < 3:
-        parsed_mini.append(("—", "—"))
-    mini_w = (x2 - x1 - 88 - 24) // 3
-    for i, item in enumerate(parsed_mini[:3]):
-        mx1 = x1 + 44 + i * (mini_w + 12)
-        draw_glass_card(canvas, bg, (mx1, y2 - 92, mx1 + mini_w, y2 - 26), radius=20, material_level="metric")
-        draw.text((mx1 + 18, y2 - 82), item[0], fill=TOKENS["TEXT_MUTED"], font=get_font(21, False))
-        draw.text((mx1 + 18, y2 - 50), item[1], fill=TOKENS["TEXT_SECONDARY"], font=get_font(24, True))
+            parsed.append((k.strip(), v.strip()))
+    while len(parsed) < 3:
+        parsed.append(("—", "—"))
+    py1, py2 = 676, 734
+    pw = (x2 - x1 - 68 - 24) // 3
+    for i, item in enumerate(parsed):
+        px1 = x1 + 34 + i * (pw + 12)
+        draw_glass_card(canvas, bg, (px1, py1, px1 + pw, py2), radius=20, material_level="metric")
+        key, key_font = fit_text_to_width(item[0], None, 22, 16, pw - 24, ellipsis=True)
+        val, val_font = fit_text_to_width(item[1], None, 26, 16, pw - 24, ellipsis=True, bold=True)
+        draw.text((px1 + 14, py1 + 10), key, fill=TOKENS["TEXT_MUTED"], font=key_font)
+        draw.text((px1 + 14, py1 + 30), val, fill=TOKENS["TEXT_SECONDARY"], font=val_font)
 
 
 def _draw_closed_dashboard(canvas, bg, p: dict) -> None:
-    from PIL import ImageDraw
+    _draw_open_dashboard(canvas, bg, {
+        "decade_title": p.get("decade_title"),
+        "decade_earned": p.get("earned"),
+        "decade_goal": p.get("goal"),
+        "completion_percent": p.get("completion_percent"),
+        "pace_text": p.get("pace_text"),
+        "pace_color": p.get("pace_color"),
+        "pace_delta_text": p.get("pace_delta_text"),
+        "decade_metrics": p.get("metrics") or [],
+        "mini": p.get("mini") or [],
+    })
 
-    draw = ImageDraw.Draw(canvas, "RGBA")
-    panel = (72, 246, 1528, 1196)
-    draw_glass_card(canvas, bg, panel, radius=40, material_level="primary", glow_color=(108, 188, 255), glow_strength=58)
-    x1, y1, x2, y2 = panel
-
-    draw.text((x1 + 44, y1 + 34), "Главный KPI", fill=TOKENS["TEXT_PRIMARY"], font=get_type_font("SECTION_TITLE"))
-    draw.text((x1 + 44, y1 + 82), p.get("decade_title", "—"), fill=TOKENS["TEXT_SECONDARY"], font=get_type_font("CAPTION"))
-    draw.text((x1 + 44, y1 + 124), format_money_glass(p.get("earned")), fill=TOKENS["TEXT_PRIMARY"], font=get_type_font("KPI_XL"))
-    draw.text((x1 + 44, y1 + 230), f"из {format_money_glass(p.get('goal')) if _safe_int(p.get('goal')) > 0 else '—'}", fill=TOKENS["TEXT_SECONDARY"], font=get_type_font("METRIC_LABEL"))
-
-    bubble = (x2 - 356, y1 + 40, x2 - 44, y1 + 292)
-    draw_glass_card(canvas, bg, bubble, radius=58, material_level="hero", glow_color=(106, 198, 255), glow_strength=88, border_bright=True)
-    pct = p.get("pace_text", "—")
-    bb = draw.textbbox((0, 0), pct, font=get_type_font("KPI_L"))
-    bx1, by1, bx2, by2 = bubble
-    draw.text((bx1 + (bx2 - bx1 - (bb[2] - bb[0])) / 2, by1 + 84), pct, fill=p.get("pace_color", TOKENS["TEXT_PRIMARY"]), font=get_type_font("KPI_L"))
-    draw.text((bx1 + 64, by2 - 96), "Tempo", fill=TOKENS["TEXT_SECONDARY"], font=get_type_font("METRIC_LABEL"))
-    draw.text((bx1 + 64, by2 - 58), p.get("pace_delta_text", "—"), fill=TOKENS["TEXT_SECONDARY"], font=get_type_font("CAPTION"))
-
-    draw_progress_bar(canvas, (x1 + 44, y1 + 300, x2 - 44, y1 + 330), p.get("progress"))
-
-    metrics = p.get("metrics", [])[:6]
-    bw = 446
-    for i, item in enumerate(metrics):
-        col = i % 3
-        row = i // 3
-        bx = x1 + 44 + col * (bw + 14)
-        by = y1 + 364 + row * 136
-        draw_metric_box(canvas, bg, (bx, by, bx + bw, by + 120), item[0], item[1], item[2])
-
-    mini = p.get("mini", [])[:3]
-    if mini:
-        m_w = (x2 - x1 - 88 - 24) // 3
-        for i, item in enumerate(mini):
-            mx1 = x1 + 44 + i * (m_w + 12)
-            draw_glass_card(canvas, bg, (mx1, y2 - 92, mx1 + m_w, y2 - 26), radius=20, material_level="metric")
-            draw.text((mx1 + 20, y2 - 74), item, fill=TOKENS["TEXT_SECONDARY"], font=get_type_font("CAPTION"))
 
 
 def build_dashboard_image_bytes_open(payload: dict) -> BytesIO | None:
@@ -4775,9 +4750,6 @@ def build_dashboard_image_bytes_open(payload: dict) -> BytesIO | None:
 
 def build_dashboard_image_bytes_closed(payload: dict) -> BytesIO | None:
     return _build_dashboard_image("closed", payload)
-
-
-
 
 
 def _build_leaderboard_image_fallback(decade_title: str, decade_leaders: list[dict]) -> BytesIO | None:
