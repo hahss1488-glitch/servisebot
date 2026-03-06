@@ -123,14 +123,14 @@ def format_runrate(value: float | int | None) -> tuple[str, tuple[int, int, int,
     if value is None:
         return "—", TOKENS["TEXT_SECONDARY"]
     try:
-        delta = int(round((float(value) - 1.0) * 100))
+        pace = int(round(float(value) * 100))
     except Exception:
         return "—", TOKENS["TEXT_SECONDARY"]
-    if delta > 0:
-        return f"+{delta}%", TOKENS["POSITIVE"]
-    if delta < 0:
-        return f"−{abs(delta)}%", TOKENS["NEGATIVE"]
-    return "0%", TOKENS["TEXT_SECONDARY"]
+    if pace > 102:
+        return f"{pace}%", TOKENS["POSITIVE"]
+    if pace < 98:
+        return f"{pace}%", TOKENS["NEGATIVE"]
+    return f"{pace}%", TOKENS["TEXT_SECONDARY"]
 
 
 def create_aurora_background(width: int, height: int, seed: int = 42) -> Image.Image:
