@@ -468,14 +468,17 @@ def get_decade_index_for_day(day: int) -> int:
 
 
 def build_short_goal_line(user_id: int) -> str:
-    goal = DatabaseManager.get_daily_goal(user_id)
-    if goal <= 0:
-        return "🎯 Цель не задана"
-    today_total = DatabaseManager.get_user_total_for_date(user_id, now_local().strftime("%Y-%m-%d"))
-    percent = calculate_percent(today_total, goal)
+    active_shift = DatabaseManager.get_active_shift(user_id)
+    if not active_shift:
+        return "🎯 Цель смены не задана"
+    shift_target = int(active_shift.get("shift_target") or 0)
+    if shift_target <= 0:
+        return "🎯 Цель смены не задана"
+    shift_total = DatabaseManager.get_shift_total(active_shift["id"])
+    percent = calculate_percent(shift_total, shift_target)
     filled = min(percent // 20, 5)
     bar = "█" * filled + "░" * (5 - filled)
-    return f"🎯 {format_money(today_total)}/{format_money(goal)} {percent}% {bar}"
+    return f"🎯 {format_money(shift_total)}/{format_money(shift_target)} {percent}% {bar}"
 
 
 def format_decade_title(year: int, month: int, decade_index: int) -> str:
@@ -777,31 +780,31 @@ def build_current_shift_dashboard(user_id: int, shift: dict, cars: list[dict], t
     decade_earned_total = int(p["earned_decade"])
     decade_remaining = int(p["remaining"])
     day_plan = int(p["avg_per_shift"])
-    need_today = int(p["need_today"])
+    shift_target = int(shift.get("shift_target") or 0)
     work_units_left = int(p["work_units_left"])
     delta = int(p["delta"])
 
     logger.debug(
-        "dashboard planning metrics user_id=%s days_total=%s days_left_including_today=%s remaining=%s need_today=%s avg_per_day=%s",
+        "dashboard planning metrics user_id=%s work_units_total=%s work_units_left=%s remaining=%s shift_target=%s avg_per_shift=%s",
         user_id,
         p["work_units_total"],
         work_units_left,
         decade_remaining,
-        need_today,
+        shift_target,
         day_plan,
     )
 
-    if need_today > 0:
-        today_percent = calculate_percent(shift_income, need_today)
+    if shift_target > 0:
+        today_percent = calculate_percent(shift_income, shift_target)
         progress_bar = render_bar(today_percent, 10)
-        runrate_to_need_today = (shift_income / need_today) - 1
-        runrate_line = f"⚡ Ранрейт к нужному сегодня: {runrate_to_need_today:+.0%}"
-        today_line = f"{format_money(shift_income)} / {format_money(need_today)} нужно сегодня"
+        runrate_to_need_today = (shift_income / shift_target) - 1
+        runrate_line = f"⚡ Ранрейт к цели смены: {runrate_to_need_today:+.0%}"
+        today_line = f"{format_money(shift_income)} / {format_money(shift_target)}"
     else:
         today_percent = 100
         progress_bar = render_bar(today_percent, 10)
-        runrate_line = "⚡ Ранрейт к нужному сегодня: План закрыт ✅"
-        today_line = f"{format_money(shift_income)} / План закрыт ✅"
+        runrate_line = "⚡ Ранрейт к цели смены: цель не задана"
+        today_line = f"{format_money(shift_income)} / —"
 
     if delta < 0:
         delta_line = f"Отставание на текущий день: -{format_money(abs(delta))}"
@@ -809,17 +812,18 @@ def build_current_shift_dashboard(user_id: int, shift: dict, cars: list[dict], t
         delta_line = f"Опережение: +{format_money(delta)}"
 
     return (
-        "📅 Сегодня:\n"
+        "📅 Текущая смена:\n"
         f"Смена идёт с: {shift_start_label}\n"
         f"Машин: {shift_cars}\n"
-        f"Доход: {today_line}\n"
-        f"% выполнения: {today_percent}%\n"
+        f"Доход смены: {format_money(shift_income)}\n"
+        f"Цель смены: {format_money(shift_target) if shift_target > 0 else '—'}\n"
+        f"% выполнения смены: {today_percent}%\n"
         f"{progress_bar}\n\n"
         "🎯 План декады:\n"
         f"Всего заработано: {format_money(decade_earned_total)} / {format_money(decade_plan_total)}\n"
         f"Осталось: {format_money(decade_remaining)}\n"
         f"Осталось смен (включая текущую): {work_units_left}\n"
-        f"Нужно в день, чтобы успеть: {format_money(need_today)}\n"
+        f"Нужно в смену, чтобы успеть: {format_money(int(p['shift_target_now']))}\n"
         f"Средний план по декаде: {format_money(day_plan)}/смена\n"
         f"{delta_line}\n\n"
         f"{runrate_line}"
@@ -962,32 +966,33 @@ def get_goal_text(user_id: int) -> str:
     shift_total = DatabaseManager.get_shift_total(active_shift["id"]) if active_shift else 0
 
     p = calculate_current_decade_shift_plan(db_user)
-    need_today = int(p["need_today"])
+    shift_target_now = int(p["shift_target_now"])
     decade_plan_total = int(p["decade_goal"])
+    shift_target = int(active_shift.get("shift_target") or 0) if active_shift else shift_target_now
 
     logger.debug(
-        "pinned planning metrics user_id=%s work_units_total=%s work_units_left=%s remaining=%s need_today=%s avg_per_shift=%s shift_id=%s",
+        "pinned planning metrics user_id=%s work_units_total=%s work_units_left=%s remaining=%s shift_target=%s avg_per_shift=%s shift_id=%s",
         user_id,
         p["work_units_total"],
         p["work_units_left"],
         p["remaining"],
-        need_today,
+        shift_target,
         p["avg_per_shift"],
         active_shift["id"] if active_shift else 0,
     )
 
     if decade_plan_total <= 0:
         return ""
-    percent = 100 if need_today == 0 else calculate_percent(int(shift_total), need_today)
+    percent = 100 if shift_target == 0 else calculate_percent(int(shift_total), shift_target)
     bar = render_bar(percent, 10)
     if not active_shift:
-        return f"Цель: {format_money(0)} / {format_money(need_today)}\nСмена не открыта {bar}"
-    return f"Цель: {format_money(int(shift_total))} / {format_money(need_today)} {bar}"
+        return f"Цель смены: {format_money(0)} / {format_money(shift_target)}\nСмена не открыта {bar}"
+    return f"Цель смены: {format_money(int(shift_total))} / {format_money(shift_target)} {bar}"
 
 
-def calculate_current_decade_daily_goal(db_user: dict) -> int:
+def calculate_current_decade_shift_target(db_user: dict) -> int:
     plan = calculate_current_decade_shift_plan(db_user)
-    return int(plan["need_today"])
+    return int(plan["shift_target_now"])
 
 
 def calculate_current_decade_shift_plan(db_user: dict) -> dict:
@@ -1023,7 +1028,7 @@ def calculate_current_decade_shift_plan(db_user: dict) -> dict:
     denom_total = max(1, work_units_total)
     denom_left = max(1, work_units_left)
     avg_per_shift = int((decade_goal + denom_total - 1) / denom_total) if decade_goal > 0 else 0
-    need_today = int((remaining + denom_left - 1) / denom_left) if remaining > 0 else 0
+    shift_target_now = int((remaining + denom_left - 1) / denom_left) if remaining > 0 else 0
     planned_by_today = avg_per_shift * max(1, work_units_elapsed)
     delta = earned - planned_by_today
 
@@ -1034,9 +1039,19 @@ def calculate_current_decade_shift_plan(db_user: dict) -> dict:
         "work_units_total": work_units_total,
         "work_units_left": work_units_left,
         "avg_per_shift": avg_per_shift,
-        "need_today": need_today,
+        "shift_target_now": shift_target_now,
         "delta": delta,
     }
+
+
+def init_shift_target(db_user: dict, shift_id: int) -> int:
+    if not DatabaseManager.is_goal_enabled(db_user["id"]):
+        DatabaseManager.set_shift_target(shift_id, 0)
+        return 0
+    shift_target = calculate_current_decade_shift_target(db_user)
+    DatabaseManager.set_shift_target(shift_id, shift_target)
+    DatabaseManager.set_shift_goal(db_user["id"], shift_target)
+    return shift_target
 
 
 def get_edit_mode(context: CallbackContext, car_id: int) -> bool:
@@ -1561,15 +1576,38 @@ async def handle_message(update: Update, context: CallbackContext):
             return
         DatabaseManager.set_decade_goal(db_user["id"], goal_value)
         DatabaseManager.set_goal_enabled(db_user["id"], True)
-        daily_goal = calculate_current_decade_daily_goal(db_user)
-        DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
         context.user_data.pop("awaiting_decade_goal", None)
         has_active = DatabaseManager.get_active_shift(db_user['id']) is not None
         await update.message.reply_text(
-            "✅ Цель дня обновлена.",
+            "✅ Цель смены обновлена.",
             reply_markup=create_main_reply_keyboard(has_active)
         )
+        active_shift = DatabaseManager.get_active_shift(db_user["id"])
+        if active_shift:
+            init_shift_target(db_user, int(active_shift["id"]))
         await send_goal_status(update, context, db_user['id'])
+        return
+
+    if context.user_data.get("awaiting_profile_name"):
+        new_name = text.strip()
+        if not new_name:
+            await update.message.reply_text("❌ Имя не может быть пустым. Попробуй ещё раз.")
+            return
+        new_name = " ".join(new_name.split())
+        if len(new_name) > 32:
+            new_name = new_name[:32].rstrip()
+        db_user = DatabaseManager.get_user(user.id)
+        if not db_user:
+            context.user_data.pop("awaiting_profile_name", None)
+            await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
+            return
+        DatabaseManager.update_user_name(db_user["id"], new_name)
+        context.user_data.pop("awaiting_profile_name", None)
+        updated = DatabaseManager.get_user(user.id)
+        await update.message.reply_text(
+            f"✅ Имя обновлено: {new_name}",
+            reply_markup=create_main_reply_keyboard(bool(DatabaseManager.get_active_shift(db_user['id'])), is_subscription_active(updated or db_user)),
+        )
         return
 
     awaiting_combo_name = context.user_data.get("awaiting_combo_name")
@@ -1661,7 +1699,7 @@ async def handle_message(update: Update, context: CallbackContext):
                 "Вы можете указать денежную цель для каждой декады.\n"
                 "Исходя из этой цели бот автоматически рассчитает сколько нужно зарабатывть каждую смену чтобы к концу декады вышла эта сумма.\n\n"
                 "Бот из указанной цели вычитает уже заработанную сумму за эту декаду, делит на количество оставшихся рабочих дней указанных в календаре для текущей декады (как основных, так и запланированных доп. смен) и дает динамичный расчет цели дня.\n\n"
-                "При открытии смены в закрепленном сообщении будет появляться цель дня, та самая рассчитая сумма по формуле выше.\n\n"
+                "При открытии смены в закрепленном сообщении будет появляться цель смены, та самая рассчитая сумма по формуле выше.\n\n"
                 "Укажите цель декады. Например: 35000"
             )
             return
@@ -1797,6 +1835,7 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "subscription_info": subscription_info_callback,
         "subscription_info_photo": subscription_info_photo_callback,
         "account_info": account_info_callback,
+        "profile_change_name": profile_change_name_callback,
         "show_price": show_price_callback,
         "calendar_open": calendar_callback,
         "nav:back": nav_back_callback,
@@ -1965,7 +2004,8 @@ def open_shift_core(db_user: dict) -> tuple[bool, str, bool]:
         time_text = start_time.strftime('%H:%M %d.%m') if start_time else "неизвестно"
         return False, f"❌ У вас уже есть активная смена!\nНачата: {time_text}", False
 
-    DatabaseManager.start_shift(db_user['id'])
+    shift_id = DatabaseManager.start_shift(db_user['id'])
+    init_shift_target(db_user, shift_id)
     today = now_local().date()
     marked_extra = False
     if get_work_day_type(db_user, today) == "off":
@@ -1998,8 +2038,6 @@ async def open_shift(query, context):
         reply_markup=main_menu_for_db_user(db_user, True)
     )
     if DatabaseManager.is_goal_enabled(db_user["id"]):
-        daily_goal = calculate_current_decade_daily_goal(db_user)
-        DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
         await send_goal_status(None, context, db_user['id'], source_message=query.message)
 
 async def add_car(query, context):
@@ -2694,8 +2732,6 @@ async def calendar_set_day_type_callback(query, context, data):
         raise
 
     if DatabaseManager.is_goal_enabled(db_user["id"]):
-        daily_goal = calculate_current_decade_daily_goal(db_user)
-        DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
         await send_goal_status(None, context, db_user["id"], source_message=query.message)
 
 
@@ -2779,8 +2815,20 @@ def build_profile_text(db_user: dict, telegram_id: int) -> str:
 def build_profile_keyboard(db_user: dict, telegram_id: int) -> InlineKeyboardMarkup | None:
     callback = "subscription_info_photo" if get_section_photo_file_id("profile") else "subscription_info"
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Изменить имя", callback_data="profile_change_name")],
         [InlineKeyboardButton("Купить подписку", callback_data=callback)],
     ])
+
+
+async def profile_change_name_callback(query, context):
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+    context.user_data["awaiting_profile_name"] = True
+    await query.edit_message_text(
+        "Введи новое имя для профиля и leaderboard (до 32 символов)."
+    )
 
 
 SECTION_MEDIA_KEYS = {
@@ -3917,8 +3965,6 @@ async def close_shift_confirm_yes(query, context, data):
     if not cars:
         DatabaseManager.delete_shift(shift_id)
         if DatabaseManager.is_goal_enabled(db_user["id"]):
-            daily_goal = calculate_current_decade_daily_goal(db_user)
-            DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
             await send_goal_status(None, context, db_user["id"], source_message=query.message)
         await query.edit_message_text("🗑️ Пустая смена удалена и не сохранена в истории.")
         await query.message.reply_text(
@@ -3929,8 +3975,6 @@ async def close_shift_confirm_yes(query, context, data):
 
     DatabaseManager.close_shift(shift_id)
     if DatabaseManager.is_goal_enabled(db_user["id"]):
-        daily_goal = calculate_current_decade_daily_goal(db_user)
-        DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
         await send_goal_status(None, context, db_user["id"], source_message=query.message)
     closed_shift = DatabaseManager.get_shift(shift_id) or shift
     message = build_closed_shift_dashboard(closed_shift, cars, total)
@@ -3974,14 +4018,14 @@ async def go_back(query, context):
     )
 
 async def change_goal(query, context):
-    """Запрос цели дня"""
+    """Запрос цели смены"""
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user or not DatabaseManager.get_active_shift(db_user['id']):
-        await query.edit_message_text("🎯 Цель дня доступна только при открытой смене.")
+        await query.edit_message_text("🎯 Цель смены доступна только при открытой смене.")
         return
     context.user_data['awaiting_goal'] = True
     await query.edit_message_text(
-        "Введи цель дня суммой, например: 5000"
+        "Введи цель смены суммой, например: 5000"
     )
 
 async def change_decade_goal(query, context):
@@ -3993,7 +4037,7 @@ async def change_decade_goal(query, context):
 
     if DatabaseManager.is_goal_enabled(db_user["id"]):
         DatabaseManager.set_goal_enabled(db_user["id"], False)
-        DatabaseManager.set_daily_goal(db_user["id"], 0)
+        DatabaseManager.set_shift_goal(db_user["id"], 0)
         await disable_goal_status(context, db_user["id"])
         await query.edit_message_text(
             "✅ Цель декады выключена.",
@@ -4075,6 +4119,15 @@ def _build_fallback_avatar(size: int, initials: str):
     box = draw.textbbox((0, 0), text, font=font)
     draw.text(((size - (box[2] - box[0])) / 2, (size - (box[3] - box[1])) / 2), text, fill="#EAF0FF", font=font)
     return img
+
+
+def _initials(name: str) -> str:
+    parts = [p for p in str(name or "").replace("_", " ").split() if p]
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][:1] + parts[1][:1]).upper()
 def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
         return None
@@ -4306,6 +4359,278 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
     return out
 
 
+def render_background(image, draw):
+    from PIL import Image, ImageDraw, ImageFilter
+
+    width, height = image.size
+    top = (0x3A, 0x00, 0x05)
+    mid = (0x5A, 0x00, 0x0A)
+    bot = (0x2A, 0x00, 0x03)
+    for y in range(height):
+        t = y / max(height - 1, 1)
+        if t < 0.55:
+            k = t / 0.55
+            c1, c2 = top, mid
+        else:
+            k = (t - 0.55) / 0.45
+            c1, c2 = mid, bot
+        col = (int(c1[0] + (c2[0] - c1[0]) * k), int(c1[1] + (c2[1] - c1[1]) * k), int(c1[2] + (c2[2] - c1[2]) * k), 255)
+        draw.line((0, y, width, y), fill=col)
+
+    stripes = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(stripes, "RGBA")
+    stripe_color = (0x8B, 0x00, 0x0F, 26)
+    step = 140
+    for x in range(-height, width, step):
+        sd.polygon([(x, 0), (x + 70, 0), (x + height + 70, height), (x + height, height)], fill=stripe_color)
+    image.alpha_composite(stripes)
+
+    glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow, "RGBA")
+    cx, cy = width // 2, int(height * 0.40)
+    gd.ellipse((cx - 500, cy - 240, cx + 500, cy + 240), fill=(0xFF, 0xD9, 0x8A, 38))
+    glow = glow.filter(ImageFilter.GaussianBlur(300 / 6))
+    image.alpha_composite(glow)
+
+    sparks = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    pd = ImageDraw.Draw(sparks, "RGBA")
+    for i in range(120):
+        x = (i * 173) % width
+        y = (i * 311) % height
+        r = 2 + (i % 3 == 0)
+        pd.ellipse((x - r, y - r, x + r, y + r), fill=(0xFF, 0xD9, 0x8A, 50))
+    image.alpha_composite(sparks)
+
+
+def render_title(draw, title_font, subtitle_font, width, top, decade_title):
+    title = "LEADERBOARD"
+    tb = draw.textbbox((0, 0), title, font=title_font)
+    tx = (width - (tb[2] - tb[0])) // 2
+    draw.text((tx + 2, top + 4), title, fill=(245, 199, 106, 70), font=title_font)
+    draw.text((tx, top), title, fill=(255, 244, 214, 255), font=title_font)
+
+    sub = decade_title
+    sb = draw.textbbox((0, 0), sub, font=subtitle_font)
+    sx = (width - (sb[2] - sb[0])) // 2
+    sy = top + 96
+    draw.text((sx, sy), sub, fill=(245, 199, 106, 245), font=subtitle_font)
+
+    ly = sy + 58
+    draw.rounded_rectangle((width // 2 - 210, ly, width // 2 + 210, ly + 3), radius=1, fill=(255, 217, 138, 220))
+
+
+def _gradient_rect(draw, box, c_top, c_mid, c_bot, radius=16, outline=None, width=1):
+    x1, y1, x2, y2 = box
+    h = max(y2 - y1, 1)
+    for i in range(h):
+        t = i / max(h - 1, 1)
+        if t < 0.5:
+            k = t / 0.5
+            c1, c2 = c_top, c_mid
+        else:
+            k = (t - 0.5) / 0.5
+            c1, c2 = c_mid, c_bot
+        col = (
+            int(c1[0] + (c2[0] - c1[0]) * k),
+            int(c1[1] + (c2[1] - c1[1]) * k),
+            int(c1[2] + (c2[2] - c1[2]) * k),
+            int(c1[3] + (c2[3] - c1[3]) * k),
+        )
+        draw.rounded_rectangle((x1, y1 + i, x2, y1 + i + 1), radius=radius, fill=col)
+    if outline:
+        draw.rounded_rectangle(box, radius=radius, outline=outline, width=width)
+
+
+def render_table_header(draw, font, x, y, cols, gap):
+    labels = ["МЕСТО", "СОТРУДНИК", "СРЕДНЕЕ В ЧАС ₽/ч", "RUN RATE", "ИТОГ"]
+    x0 = x
+    widths = cols
+    for label, w in zip(labels, widths):
+        _gradient_rect(
+            draw,
+            (x0, y, x0 + w, y + 64),
+            (0x4A, 0x00, 0x08, 240),
+            (0x3A, 0x00, 0x05, 240),
+            (0x1A, 0x05, 0x05, 245),
+            radius=16,
+            outline=(255, 217, 138, 120),
+            width=1,
+        )
+        tb = draw.textbbox((0, 0), label, font=font)
+        draw.text((x0 + (w - (tb[2] - tb[0])) / 2, y + 18), label, fill=(245, 199, 106, 245), font=font)
+        x0 += w + gap
+
+
+def render_row_panel(base_image, draw, box, place):
+    from PIL import Image, ImageDraw, ImageFilter
+
+    x1, y1, x2, y2 = box
+    glow = {1: (255, 217, 138, 80, 40), 2: (207, 207, 207, 55, 25), 3: (194, 122, 58, 45, 18)}.get(place)
+    if glow:
+        col = glow[:3]
+        alpha = glow[3]
+        blur = glow[4]
+        layer = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
+        ld = ImageDraw.Draw(layer, "RGBA")
+        ld.rounded_rectangle((x1 - 10, y1 - 6, x2 + 10, y2 + 6), radius=20, fill=(*col, alpha))
+        layer = layer.filter(ImageFilter.GaussianBlur(blur / 4))
+        base_image.alpha_composite(layer)
+
+    draw.rounded_rectangle((x1 + 2, y1 + 8, x2 + 2, y2 + 10), radius=16, fill=(0, 0, 0, 120))
+    _gradient_rect(
+        draw,
+        (x1, y1, x2, y2),
+        (0x4A, 0x00, 0x08, 245),
+        (0x3A, 0x00, 0x05, 245),
+        (0x2A, 0x00, 0x03, 250),
+        radius=16,
+        outline=(255, 217, 138, 205),
+        width=2,
+    )
+    draw.rounded_rectangle((x1 + 30, (y1 + y2) // 2 - 2, x2 - 30, (y1 + y2) // 2 + 2), radius=1, fill=(255, 217, 138, 100))
+
+
+def render_rank_block(draw, font, x, y, w, h, place):
+    color = {1: (255, 217, 138, 255), 2: (217, 217, 217, 255), 3: (194, 122, 58, 255)}.get(place, (255, 244, 214, 245))
+    txt = f"#{place}"
+    tb = draw.textbbox((0, 0), txt, font=font)
+    draw.text((x + 12, y + (h - (tb[3] - tb[1])) / 2 - 2), txt, fill=color, font=font)
+    if place <= 3:
+        draw.text((x + w - 34, y + 10), "⌂", fill=color, font=font)
+
+
+def render_avatar(base_image, avatar_image, x, y, size, initials, border_color, is_top1=False):
+    from PIL import Image, ImageDraw, ImageFilter
+
+    if is_top1:
+        glow = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
+        gd = ImageDraw.Draw(glow, "RGBA")
+        gd.ellipse((x - 12, y - 12, x + size + 12, y + size + 12), fill=(255, 215, 120, 90))
+        glow = glow.filter(ImageFilter.GaussianBlur(20 / 2))
+        base_image.alpha_composite(glow)
+
+    avatar = avatar_image.resize((size, size)).convert("RGBA") if avatar_image is not None else _build_fallback_avatar(size, initials)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+    base_image.paste(avatar, (x, y), mask)
+
+    ol = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(ol, "RGBA")
+    od.ellipse((x - 2, y - 2, x + size + 2, y + size + 2), outline=border_color, width=3)
+    base_image.alpha_composite(ol)
+
+
+def render_employee_block(draw, font, x, y, max_w, name):
+    text = (name or "—").strip() or "—"
+    while len(text) > 1 and draw.textbbox((0, 0), text, font=font)[2] > max_w:
+        text = text[:-2] + "…"
+    draw.text((x, y), text, fill=(255, 244, 214, 255), font=font)
+
+
+def render_avg_hour_block(draw, font, x, y, w, h, avg_text):
+    _gradient_rect(draw, (x, y, x + w, y + h), (0x5E, 0x00, 0x08, 245), (0x4A, 0x00, 0x08, 245), (0x3A, 0x00, 0x05, 245), radius=12, outline=(255, 217, 138, 160), width=2)
+    tb = draw.textbbox((0, 0), avg_text, font=font)
+    draw.text((x + (w - (tb[2] - tb[0])) / 2, y + (h - (tb[3] - tb[1])) / 2 - 2), avg_text, fill=(255, 244, 214, 255), font=font)
+
+
+def render_run_rate_block(draw, font, x, y, ratio: float | None):
+    segments = 8
+    sw, sh, gap = 18, 18, 6
+    if ratio is None:
+        draw.text((x + 78, y - 4), "—", fill=(233, 211, 167, 230), font=font)
+        return
+    filled = int(round(max(0.0, min(ratio, 1.0)) * segments))
+    for i in range(segments):
+        sx = x + i * (sw + gap)
+        col = (255, 215, 107, 235) if i < filled else (58, 26, 18, 255)
+        draw.rounded_rectangle((sx, y, sx + sw, y + sh), radius=4, fill=col)
+    pct = f"{int(ratio * 100)}%"
+    draw.text((x + 8 * (sw + gap) + 10, y - 1), pct, fill=(245, 199, 106, 225), font=font)
+
+
+def render_total_block(draw, font, x, y, w, h, total_text, is_top1=False):
+    _gradient_rect(draw, (x, y, x + w, y + h), (0x3A, 0x0B, 0x0B, 245), (0x2B, 0x13, 0x0E, 245), (0x1A, 0x05, 0x05, 250), radius=12, outline=(255, 217, 138, 210), width=2)
+    color = (255, 217, 138, 255) if is_top1 else (255, 244, 214, 255)
+    tb = draw.textbbox((0, 0), total_text, font=font)
+    draw.text((x + (w - (tb[2] - tb[0])) / 2, y + (h - (tb[3] - tb[1])) / 2 - 2), total_text, fill=color, font=font)
+
+
+def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
+    del highlight_name
+    if importlib.util.find_spec("PIL") is None:
+        return None
+    from PIL import Image, ImageDraw, ImageFont
+
+    if not decade_leaders:
+        return None
+
+    width = 1600
+    top_pad, bottom_pad, left_pad, right_pad = 80, 80, 80, 80
+    row_height, row_gap = 110, 22
+
+    cols_raw = [150, 560, 240, 250, 280]
+    content_w = width - left_pad - right_pad
+    scale = content_w / sum(cols_raw)
+    cols = [int(v * scale) for v in cols_raw]
+    cols[-1] += content_w - sum(cols)
+
+    title_h = 180
+    header_h = 100
+    users_count = len(decade_leaders)
+    height = top_pad + title_h + header_h + users_count * row_height + max(users_count - 1, 0) * row_gap + bottom_pad
+
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+    draw = ImageDraw.Draw(img, "RGBA")
+    render_background(img, draw)
+
+    title_font = _load_rank_font(ImageFont, 90)
+    subtitle_font = _load_rank_font(ImageFont, 36)
+    header_font = _load_rank_font(ImageFont, 26)
+    rank_font = _load_rank_font(ImageFont, 46)
+    name_font = _load_rank_font(ImageFont, 40)
+    avg_font = _load_rank_font(ImageFont, 36)
+    total_font = _load_rank_font(ImageFont, 46)
+
+    render_title(draw, title_font, subtitle_font, width, top_pad, decade_title)
+
+    header_y = top_pad + title_h
+    render_table_header(draw, header_font, left_pad, header_y, [150, 560, 240, 250, 280], gap=10)
+
+    y = header_y + header_h
+    avatars = top3_avatars or {}
+
+    for place, row in enumerate(decade_leaders, start=1):
+        x = left_pad
+        render_row_panel(img, draw, (left_pad, y, width - right_pad, y + row_height), place)
+
+        render_rank_block(draw, rank_font, x, y, cols[0], row_height, place)
+        x += cols[0]
+
+        av = avatars.get(int(row.get("telegram_id") or 0))
+        bcol = {1: (255, 217, 138, 255), 2: (217, 217, 217, 255), 3: (194, 122, 58, 255)}.get(place, (255, 217, 138, 210))
+        render_avatar(img, av, x + 12, y + (row_height - 72) // 2, 72, _initials(str(row.get("name", ""))), bcol, is_top1=(place == 1))
+        render_employee_block(draw, name_font, x + 96, y + 32, cols[1] - 108, str(row.get("name", "—")))
+        x += cols[1]
+
+        avg_text = "—" if float(row.get("total_hours") or 0) <= 0 else f"{format_money(int(row.get('avg_per_hour') or 0))}"
+        render_avg_hour_block(draw, avg_font, x + 10, y + 20, cols[2] - 20, 70, avg_text)
+        x += cols[2]
+
+        run_rate = row.get("run_rate")
+        render_run_rate_block(draw, header_font, x + 12, y + (row_height - 18) // 2, run_rate)
+        x += cols[3]
+
+        render_total_block(draw, total_font, x + 10, y + 16, cols[4] - 20, 78, format_money(int(row.get("total_amount") or 0)), is_top1=(place == 1))
+
+        y += row_height + row_gap
+
+    out = BytesIO()
+    out.name = "leaderboard.png"
+    img.convert("RGB").save(out, format="PNG")
+    out.seek(0)
+    return out
+
+
 async def send_leaderboard_output(chat_target, context: CallbackContext, decade_title: str, decade_leaders: list[dict], reply_markup=None, highlight_name: str | None = None):
     text_message = build_leaderboard_text(decade_title, decade_leaders)
     # live statuses
@@ -4321,15 +4646,14 @@ async def send_leaderboard_output(chat_target, context: CallbackContext, decade_
     top3_avatars: dict[int, object] = {}
     try:
         tasks = []
-        top3 = decade_leaders[:3]
-        for place, leader in enumerate(top3, start=1):
+        for leader in decade_leaders:
             uid = int(leader.get("telegram_id") or 0)
             name = str(leader.get("name", ""))
-            tasks.append(get_avatar_image_async(context.bot, uid, 140 if place == 1 else 112, fallback_name=name))
+            tasks.append(get_avatar_image_async(context.bot, uid, 96, fallback_name=name))
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for place, res in enumerate(results, start=1):
+        for leader, res in zip(decade_leaders, results):
             if not isinstance(res, Exception):
-                top3_avatars[place] = res
+                top3_avatars[int(leader.get("telegram_id") or 0)] = res
     except Exception:
         await edit_status(st, "⚠️ Не смог получить часть данных, показал то, что есть.")
 
@@ -4370,7 +4694,7 @@ async def leaderboard(query, context):
     """Топ героев: лидеры текущей декады"""
     today = now_local().date()
     idx, _, _, _, decade_title = get_decade_period(today)
-    decade_leaders = DatabaseManager.get_decade_leaderboard(today.year, today.month, idx)
+    decade_leaders = DatabaseManager.get_decade_leaderboard_daily(today.year, today.month, idx)
 
     db_user = DatabaseManager.get_user(query.from_user.id)
     has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
@@ -4390,7 +4714,7 @@ async def reset_data_prompt(query, context):
     await query.edit_message_text(
         "⚠️ Вы точно хотите полностью сбросить аккаунт?\n\n"
 
-        "Будут удалены: все смены, машины, услуги, комбо, цель дня и история.",
+        "Будут удалены: все смены, машины, услуги, комбо, цель смены и история.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Да, удалить всё", callback_data="reset_data_yes")],
             [InlineKeyboardButton("❌ Нет", callback_data="reset_data_no")],
@@ -4543,7 +4867,7 @@ async def settings_message(update: Update, context: CallbackContext):
 async def leaderboard_message(update: Update, context: CallbackContext):
     today = now_local().date()
     idx, _, _, _, decade_title = get_decade_period(today)
-    decade_leaders = DatabaseManager.get_decade_leaderboard(today.year, today.month, idx)
+    decade_leaders = DatabaseManager.get_decade_leaderboard_daily(today.year, today.month, idx)
 
     db_user = DatabaseManager.get_user(update.effective_user.id)
     has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
