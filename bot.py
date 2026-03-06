@@ -45,6 +45,20 @@ from services.status import send_status, edit_status, done_status
 from services.planning import compute_plan_metrics
 from ui.texts import STATUS_LEADERBOARD
 from ui.nav import push_screen, pop_screen, get_current_screen, Screen
+from ui.glass_ui import (
+    TOKENS,
+    create_aurora_background,
+    draw_avatar_circle,
+    draw_divider_glow,
+    draw_glass_card,
+    draw_glass_pill,
+    draw_metric_box,
+    draw_progress_bar,
+    format_money as format_money_glass,
+    format_runrate,
+    get_font,
+    truncate_text_to_width,
+)
 
 # Настройка логирования
 logging.basicConfig(
@@ -953,6 +967,88 @@ def build_decade_progress_dashboard(user_id: int) -> str:
         f"Машин в декаде: {cars_done}\n"
         f"Средний чек декады: {format_money(avg_check)}"
     )
+
+
+def _build_open_dashboard_payload(user_id: int, shift: dict, cars: list[dict], total: int) -> dict:
+    db_user = DatabaseManager.get_user_by_id(user_id)
+    p = calculate_current_decade_shift_plan(db_user) if db_user else {}
+    shift_start = parse_datetime(shift.get("start_time"))
+    shift_target = int(shift.get("shift_target") or 0)
+    shift_income = int(total or 0)
+    if shift_target > 0:
+        today_progress = max(0.0, min(1.0, shift_income / shift_target))
+        rr_text, rr_color = format_runrate((shift_income / shift_target) if shift_target else None)
+        remaining_shift_text = format_money_glass(max(shift_target - shift_income, 0))
+        today_percent_text = f"{int(today_progress * 100)}%"
+    else:
+        today_progress = None
+        rr_text, rr_color = "цель не задана", TOKENS["TEXT_SECONDARY"]
+        remaining_shift_text = "—"
+        today_percent_text = "—"
+
+    goal = int(p.get("decade_goal") or 0)
+    earned = int(p.get("earned_decade") or 0)
+    decade_progress = max(0.0, min(1.0, earned / goal)) if goal > 0 else None
+    decade_runrate_text, decade_runrate_color = format_runrate((earned / goal) if goal > 0 else None)
+    delta = int(p.get("delta") or 0)
+    delta_color = TOKENS["POSITIVE"] if delta >= 0 else TOKENS["NEGATIVE"]
+    return {
+        "shift_start_label": shift_start.strftime("%d.%m %H:%M") if shift_start else "—",
+        "shift_income": shift_income,
+        "shift_cars": len(cars),
+        "shift_target": shift_target,
+        "today_progress": today_progress,
+        "today_percent_text": today_percent_text,
+        "runrate_text": rr_text,
+        "runrate_color": rr_color,
+        "remaining_shift_text": remaining_shift_text,
+        "decade_title": f"{get_decade_period(now_local().date())[4]} · {format_decade_range(get_decade_period(now_local().date())[1], get_decade_period(now_local().date())[2])}",
+        "decade_earned": earned,
+        "decade_goal": goal,
+        "decade_progress": decade_progress,
+        "decade_metrics": [
+            ("Осталось", format_money_glass(int(p.get("remaining") or 0)), TOKENS["TEXT_PRIMARY"]),
+            ("Осталось смен", str(int(p.get("work_units_left") or 0)), TOKENS["TEXT_PRIMARY"]),
+            ("Нужно в смену", format_money_glass(int(p.get("shift_target_now") or 0)), TOKENS["TEXT_PRIMARY"]),
+            ("Средний план", format_money_glass(int(p.get("avg_per_shift") or 0)), TOKENS["TEXT_PRIMARY"]),
+            ("Дельта", f"{delta:+,}".replace(",", " ") + " ₽", delta_color),
+            ("Ранрейт", decade_runrate_text, decade_runrate_color),
+        ],
+    }
+
+
+def _build_closed_dashboard_payload(user_id: int) -> dict:
+    db_user = DatabaseManager.get_user_by_id(user_id)
+    p = calculate_current_decade_shift_plan(db_user) if db_user else {}
+    today = now_local().date()
+    _, start_d, end_d, _, title = get_decade_period(today)
+    earned = int(p.get("earned_decade") or 0)
+    goal = int(p.get("decade_goal") or 0)
+    progress = max(0.0, min(1.0, earned / goal)) if goal > 0 else None
+    runrate_text, runrate_color = format_runrate((earned / goal) if goal > 0 else None)
+    delta = int(p.get("delta") or 0)
+    shifts_done = DatabaseManager.get_shifts_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
+    cars_done = DatabaseManager.get_cars_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
+    avg_check = int(earned / cars_done) if cars_done else 0
+    return {
+        "decade_title": f"{title} · {format_decade_range(start_d, end_d)}",
+        "earned": earned,
+        "goal": goal,
+        "progress": progress,
+        "metrics": [
+            ("Осталось до цели", format_money_glass(int(p.get("remaining") or 0)), TOKENS["TEXT_PRIMARY"]),
+            ("Осталось смен", str(int(p.get("work_units_left") or 0)), TOKENS["TEXT_PRIMARY"]),
+            ("Нужно в смену", format_money_glass(int(p.get("shift_target_now") or 0)), TOKENS["TEXT_PRIMARY"]),
+            ("Средний план", format_money_glass(int(p.get("avg_per_shift") or 0)), TOKENS["TEXT_PRIMARY"]),
+            ("Опережение / отставание", f"{delta:+,}".replace(",", " ") + " ₽", TOKENS["POSITIVE"] if delta >= 0 else TOKENS["NEGATIVE"]),
+            ("Ранрейт", runrate_text, runrate_color),
+        ],
+        "mini": [
+            f"Смен: {shifts_done}",
+            f"Машин: {cars_done}",
+            f"Средний чек: {format_money_glass(avg_check)}",
+        ],
+    }
 
 
 
@@ -2131,10 +2227,22 @@ async def current_shift(query, context):
 
     active_shift = DatabaseManager.get_active_shift(db_user['id'])
     if not active_shift:
-        await query.edit_message_text(
-            "📭 Нет активной смены.\n"
-            "Откройте смену для начала работы."
-        )
+        text_message = build_decade_progress_dashboard(db_user['id'])
+        image = None
+        try:
+            image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id']))
+        except Exception:
+            logger.exception("dashboard closed image render failed")
+        if image is not None:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=image,
+                filename="dashboard.png",
+                caption="📊 Дашборд",
+            )
+            await query.edit_message_text("📭 Нет активной смены. Показал прогресс декады.")
+        else:
+            await query.edit_message_text(text_message, parse_mode="HTML")
         await query.message.reply_text(
             "Выбери действие:",
             reply_markup=create_main_reply_keyboard(False)
@@ -2144,14 +2252,22 @@ async def current_shift(query, context):
     cars = DatabaseManager.get_shift_cars(active_shift['id'])
     total = DatabaseManager.get_shift_total(active_shift['id'])
     message = build_current_shift_dashboard(db_user['id'], active_shift, cars, total)
-
-    await query.edit_message_text(
-        message,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 В меню", callback_data="back")],
-        ]),
-    )
+    image = None
+    try:
+        image = build_dashboard_image_bytes_open(_build_open_dashboard_payload(db_user['id'], active_shift, cars, total))
+    except Exception:
+        logger.exception("dashboard open image render failed")
+    if image is not None:
+        await context.bot.send_photo(chat_id=query.message.chat_id, photo=image, filename="dashboard.png", caption="📊 Дашборд")
+        await query.edit_message_text("✅ Дашборд сформирован")
+    else:
+        await query.edit_message_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 В меню", callback_data="back")],
+            ]),
+        )
     await query.message.reply_text(
         "Выбери действие:",
         reply_markup=create_main_reply_keyboard(True)
@@ -4035,14 +4151,22 @@ async def close_shift_confirm_yes(query, context, data):
         await send_goal_status(None, context, db_user["id"], source_message=query.message)
     closed_shift = DatabaseManager.get_shift(shift_id) or shift
     message = build_closed_shift_dashboard(closed_shift, cars, total)
-
-    await query.edit_message_text(
-        message,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 В меню", callback_data="back")],
-        ]),
-    )
+    image = None
+    try:
+        image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id']))
+    except Exception:
+        logger.exception("dashboard closed image render failed")
+    if image is not None:
+        await context.bot.send_photo(chat_id=query.message.chat_id, photo=image, filename="dashboard.png", caption="📊 Дашборд")
+        await query.edit_message_text("✅ Смена закрыта. Дашборд отправлен.")
+    else:
+        await query.edit_message_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 В меню", callback_data="back")],
+            ]),
+        )
     await query.message.reply_text(build_shift_repeat_report_text(shift_id))
     await query.message.reply_text(
         "Выбери действие:",
@@ -4294,240 +4418,237 @@ def draw_runrate(image, draw, x: int, y: int, w: int, ratio: float | None):
     draw.ellipse((marker_x - 7, y + 1, marker_x + 7, y + h - 1), fill=mk_color, outline=_hex_rgba("#FFD98A", 220), width=1)
 
 
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_float(value):
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
 def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
         return None
+    from PIL import ImageDraw
 
-    from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
+    width, height = 1600, 1200
+    bg = create_aurora_background(width, height, seed=120)
+    canvas = bg.copy()
+    draw = ImageDraw.Draw(canvas, "RGBA")
 
-    canvas_width = 1600
-    top_padding = 60
-    bottom_padding = 70
-    left_padding = 80
-    right_padding = 80
-    title_block_height = 190
-    header_block_height = 90
-    row_height = 122
-    row_gap = 22
+    draw_glass_card(canvas, bg, (60, 48, 1540, 218), radius=34, blur_radius=22, glow_color=(80, 170, 255, 70))
+    draw.text((100, 82), "ЛИДЕРБОРД", fill=TOKENS["TEXT_PRIMARY"], font=get_font(84, bold=True))
+    draw.text((103, 154), decade_title or "—", fill=TOKENS["TEXT_SECONDARY"], font=get_font(32, bold=False))
+    draw_glass_pill(canvas, bg, (1240, 86, 1490, 150), "TOP HEROES", get_font(26, bold=True), TOKENS["TEXT_PRIMARY"])
+    draw.ellipse((1260, 103, 1288, 131), fill=(120, 200, 255, 130), outline=(220, 240, 255, 210), width=2)
 
-    header_y = 245
-    header_h = 64
-    header_radius = 16
-    rows_start_y = header_y + header_h + 34
-
-    header_tabs = [
-        (80, 150, "МЕСТО"),
-        (250, 460, "СОТРУДНИК"),
-        (740, 290, "СРЕДНЕЕ В ЧАС ₽/ч"),
-        (1050, 210, "РАНРЕЙТ"),
-        (1280, 240, "ИТОГ"),
+    cards = [
+        (2, (80, 260, 510, 580), 106),
+        (1, (585, 220, 1015, 600), 122),
+        (3, (1090, 260, 1520, 580), 106),
     ]
-
-    row_x = 80
-    row_w = 1440
-    row_h = 122
-    row_radius = 16
-
-    rank_block_x_offset = 16
-    rank_block_w = 125
-    rank_block_h = row_h - 24
-    avatar_x = 215
-    avatar_size = 72
-    name_x = 315
-    name_y_offset = 31
-    name_w = 360
-    avg_x = 820
-    avg_y_offset = 34
-    runrate_x = 1035
-    runrate_y_offset = 52
-    runrate_w = 170
-    total_x = 1265
-    total_y_offset = 18
-    total_w = 210
-    total_h = 70
-
-    users_count = len(decade_leaders)
-    canvas_height = top_padding + title_block_height + header_block_height + 34 + users_count * row_height + max(users_count - 1, 0) * row_gap + bottom_padding
-
-    img = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 255))
-    draw = ImageDraw.Draw(img, "RGBA")
-    draw_background(img, draw)
-
-    title_font = _load_rank_font(ImageFont, 92)
-    subtitle_font = _load_rank_font(ImageFont, 36)
-    header_font = _load_rank_font(ImageFont, 26)
-    rank_font = _load_rank_font(ImageFont, 48)
-    name_font = _load_rank_font(ImageFont, 40)
-    avg_font = _load_rank_font(ImageFont, 42)
-    runrate_label_font = _load_rank_font(ImageFont, 18)
-    total_font = _load_rank_font(ImageFont, 46)
-    cup_font = _load_rank_font(ImageFont, 34)
-    initials_font = _load_rank_font(ImageFont, 30)
-
-    text_main = _hex_rgba("#FFF1D2")
-    gold_main = _hex_rgba("#FFD98A")
-    gold_mid = _hex_rgba("#F5C76A")
-    gold_dim = _hex_rgba("#E7B35A")
-    panel_border = _hex_rgba("#D7A04A", 225)
-
-    title = "ЛИДЕРБОРД"
-    tw = draw.textbbox((0, 0), title, font=title_font)
-    draw.text(((canvas_width - (tw[2] - tw[0])) / 2, 70), title, fill=text_main, font=title_font)
-    sw = draw.textbbox((0, 0), decade_title, font=subtitle_font)
-    draw.text(((canvas_width - (sw[2] - sw[0])) / 2, 150), decade_title, fill=gold_mid, font=subtitle_font)
-    lx1 = (canvas_width - 420) // 2
-    ly = 205
-    draw.rectangle((lx1, ly, lx1 + 420, ly + 3), fill=gold_dim)
-    draw.ellipse((canvas_width // 2 - 8, ly - 6, canvas_width // 2 + 8, ly + 10), fill=_hex_rgba("#FFB347", 210))
-
-    def _draw_header_tab(x: int, w: int, text: str):
-        tab = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        td = ImageDraw.Draw(tab, "RGBA")
-        top_c = _hex_rgba("#4A0008", 235)
-        bot_c = _hex_rgba("#210203", 235)
-        for yy in range(header_h):
-            t = yy / max(header_h - 1, 1)
-            col = tuple(int(top_c[i] + (bot_c[i] - top_c[i]) * t) for i in range(4))
-            td.line((x, header_y + yy, x + w, header_y + yy), fill=col)
-        td.rounded_rectangle((x, header_y, x + w, header_y + header_h), radius=header_radius, outline=_hex_rgba("#B97B2C", 220), width=2)
-        img.alpha_composite(tab)
-        b = draw.textbbox((0, 0), text, font=header_font)
-        tx = x + (w - (b[2] - b[0])) / 2
-        ty = header_y + (header_h - (b[3] - b[1])) / 2 - 1
-        draw.text((tx, ty), text, fill=gold_mid, font=header_font)
-
-    for x, w, txt in header_tabs:
-        _draw_header_tab(x, w, txt)
-
+    leaders = {i + 1: row for i, row in enumerate(decade_leaders[:3])}
     avatars = top3_avatars or {}
-    for place, row in enumerate(decade_leaders, start=1):
-        row_y = rows_start_y + (place - 1) * (row_h + row_gap)
 
-        # row shadow + glow
-        shadow = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        sd = ImageDraw.Draw(shadow, "RGBA")
-        sd.rounded_rectangle((row_x + 2, row_y + 6, row_x + row_w + 4, row_y + row_h + 8), radius=row_radius, fill=(0, 0, 0, 128))
-        shadow = shadow.filter(ImageFilter.GaussianBlur(12))
-        img.alpha_composite(shadow)
+    for place, bbox, av_size in cards:
+        row = leaders.get(place)
+        if not row:
+            continue
+        glow = (90, 200, 255, 80) if place == 1 else ((130, 220, 255, 55) if place == 2 else (180, 120, 255, 55))
+        draw_glass_card(canvas, bg, bbox, radius=28, blur_radius=22, border_bright=(place == 1), glow_color=glow)
+        x1, y1, x2, y2 = bbox
+        draw_glass_pill(canvas, bg, (x1 + 24, y1 + 20, x1 + 112, y1 + 64), f"#{place}", get_font(26, bold=True), TOKENS["TEXT_PRIMARY"])
 
-        row_img = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        rd = ImageDraw.Draw(row_img, "RGBA")
-        p_top = _hex_rgba("#4A0008", 230)
-        p_mid = _hex_rgba("#300004", 228)
-        p_bot = _hex_rgba("#1D0002", 228)
-        for yy in range(row_h):
-            t = yy / max(row_h - 1, 1)
-            if t <= 0.5:
-                k = t / 0.5
-                c1, c2 = p_top, p_mid
-            else:
-                k = (t - 0.5) / 0.5
-                c1, c2 = p_mid, p_bot
-            col = tuple(int(c1[i] + (c2[i] - c1[i]) * k) for i in range(4))
-            rd.line((row_x, row_y + yy, row_x + row_w, row_y + yy), fill=col)
-        rd.rounded_rectangle((row_x, row_y, row_x + row_w, row_y + row_h), radius=row_radius, outline=panel_border, width=2)
-        rd.rectangle((row_x + 14, row_y + 6, row_x + row_w - 14, row_y + 14), fill=_hex_rgba("#FFDC8C", 24))
-        rd.ellipse((row_x + row_w // 2 - 120, row_y + 44, row_x + row_w // 2 + 120, row_y + 78), fill=_hex_rgba("#FFB347", 55))
-        row_img = row_img.filter(ImageFilter.GaussianBlur(1))
-        img.alpha_composite(row_img)
+        av_x = x1 + ((x2 - x1) - av_size) // 2
+        av_y = y1 + 82
+        avatar = avatars.get(_safe_int(row.get("telegram_id")))
+        draw_avatar_circle(canvas, (av_x, av_y, av_x + av_size, av_y + av_size), avatar, str(row.get("name", "—")))
 
-        if place <= 3:
-            glow_color = "#FFD98A" if place == 1 else ("#D9D9D9" if place == 2 else "#C27A3A")
-            g = Image.new("RGBA", img.size, (0, 0, 0, 0))
-            gd = ImageDraw.Draw(g, "RGBA")
-            alpha = 72 if place == 1 else (42 if place == 2 else 36)
-            gd.rounded_rectangle((row_x - 2, row_y - 2, row_x + row_w + 2, row_y + row_h + 2), radius=row_radius + 2, outline=_hex_rgba(glow_color, alpha), width=3)
-            g = g.filter(ImageFilter.GaussianBlur(9 if place == 1 else 6))
-            img.alpha_composite(g)
-
-        rank_x = row_x + rank_block_x_offset
-        rank_y = row_y + 12
-        chevron = [
-            (rank_x, rank_y),
-            (rank_x + rank_block_w - 24, rank_y),
-            (rank_x + rank_block_w, rank_y + rank_block_h // 2),
-            (rank_x + rank_block_w - 24, rank_y + rank_block_h),
-            (rank_x, rank_y + rank_block_h),
-            (rank_x + 14, rank_y + rank_block_h // 2),
-        ]
-        draw.polygon(chevron, fill=_hex_rgba("#4A0008", 240), outline=panel_border)
-
-        rank_color = gold_main if place == 1 else (_hex_rgba("#D9D9D9") if place == 2 else (_hex_rgba("#C27A3A") if place == 3 else text_main))
-        draw.text((rank_x + 20, rank_y + 22), f"#{place}", fill=rank_color, font=rank_font)
-        if place <= 3:
-            draw.text((rank_x + 84, rank_y + 20), "🏆", fill=rank_color, font=cup_font)
-
+        name_font = get_font(42 if place == 1 else 34, bold=True)
         name_raw = str(row.get("name", "—"))
-        av = avatars.get(int(row.get("telegram_id") or 0))
-        av_y = row_y + 25
-        if av is None:
-            av = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
-            avd = ImageDraw.Draw(av, "RGBA")
-            for yy in range(avatar_size):
-                t = yy / max(avatar_size - 1, 1)
-                c1 = _hex_rgba("#4A0008")
-                c2 = _hex_rgba("#1D0002")
-                cc = tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3)) + (255,)
-                avd.line((0, yy, avatar_size, yy), fill=cc)
-            ib = avd.textbbox((0, 0), _initials(name_raw), font=initials_font)
-            avd.text(((avatar_size - (ib[2] - ib[0])) / 2, (avatar_size - (ib[3] - ib[1])) / 2 - 1), _initials(name_raw), fill=text_main, font=initials_font)
-        else:
-            try:
-                av = av.convert("RGBA")
-            except Exception:
-                av = Image.new("RGBA", (avatar_size, avatar_size), _hex_rgba("#300004"))
+        name = truncate_text_to_width(draw, name_raw, name_font, (x2 - x1) - 56)
+        nb = draw.textbbox((0, 0), name, font=name_font)
+        draw.text((x1 + ((x2 - x1) - (nb[2] - nb[0])) / 2, av_y + av_size + 20), name, fill=TOKENS["TEXT_PRIMARY"], font=name_font)
 
-        resampling = getattr(Image, "Resampling", Image)
-        lanczos = getattr(resampling, "LANCZOS", None)
-        if lanczos is None:
-            lanczos = getattr(Image, "LANCZOS", None)
-        if lanczos is None:
-            lanczos = getattr(Image, "ANTIALIAS", getattr(Image, "BICUBIC", 3))
-        try:
-            av = ImageOps.fit(av, (avatar_size, avatar_size), method=lanczos)
-        except TypeError:
-            av = ImageOps.fit(av, (avatar_size, avatar_size), lanczos)
-        mask = Image.new("L", (avatar_size, avatar_size), 0)
-        ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
-        img.paste(av, (avatar_x, av_y), mask)
-        av_border = gold_main if place == 1 else (_hex_rgba("#D9D9D9") if place == 2 else (_hex_rgba("#C27A3A") if place == 3 else panel_border))
-        draw.ellipse((avatar_x - 3, av_y - 3, avatar_x + avatar_size + 3, av_y + avatar_size + 3), outline=av_border, width=3)
+        amount = format_money_glass(_safe_int(row.get("total_amount")))
+        af = get_font(66 if place == 1 else 52, bold=True)
+        ab = draw.textbbox((0, 0), amount, font=af)
+        ay = y1 + (250 if place == 1 else 214)
+        draw.text((x1 + ((x2 - x1) - (ab[2] - ab[0])) / 2, ay), amount, fill=(238, 248, 255, 255), font=af)
+        draw_divider_glow(canvas, x1 + 40, x2 - 40, ay + 74)
 
-        name_text = _truncate_to_width(draw, name_raw, name_font, name_w)
-        draw.text((name_x, row_y + name_y_offset), name_text, fill=text_main, font=name_font)
+        avg = f"{_safe_int(row.get('avg_per_hour'))} ₽/ч" if _safe_float(row.get("total_hours")) and _safe_float(row.get("total_hours")) > 0 else "—"
+        rr_text, rr_color = format_runrate(_safe_float(row.get("run_rate")))
+        draw_glass_pill(canvas, bg, (x1 + 30, y2 - 76, x1 + 210, y2 - 30), avg, get_font(22, bold=True), TOKENS["TEXT_SECONDARY"])
+        draw_glass_pill(canvas, bg, (x2 - 210, y2 - 76, x2 - 30, y2 - 30), rr_text, get_font(22, bold=True), rr_color)
 
-        avg_text = "—"
-        if float(row.get("total_hours") or 0) > 0:
-            avg_text = f"{int(row.get('avg_per_hour') or 0)} ₽"
-        draw.text((avg_x, row_y + avg_y_offset), avg_text, fill=_hex_rgba("#F7D38C"), font=avg_font)
-
-        draw.text((runrate_x, row_y + 20), "РАНРЕЙТ", fill=gold_dim, font=runrate_label_font)
-        rr = row.get("run_rate")
-        if rr is None:
-            dash_font = _load_rank_font(ImageFont, 34)
-            db = draw.textbbox((0, 0), "—", font=dash_font)
-            draw.text((runrate_x + (runrate_w - (db[2] - db[0])) / 2, row_y + runrate_y_offset - 10), "—", fill=_hex_rgba("#CBAE7A"), font=dash_font)
-        else:
-            draw_runrate(img, draw, runrate_x, row_y + runrate_y_offset, runrate_w, rr)
-
-        total_text = format_money(int(row.get("total_amount") or 0))
-        tb = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        tbd = ImageDraw.Draw(tb, "RGBA")
-        tbd.rounded_rectangle((total_x, row_y + total_y_offset, total_x + total_w, row_y + total_y_offset + total_h), radius=12, fill=_hex_rgba("#3A0B0B", 240), outline=gold_main, width=2)
-        tbd.rounded_rectangle((total_x + 4, row_y + total_y_offset + 4, total_x + total_w - 4, row_y + total_y_offset + 18), radius=8, fill=_hex_rgba("#FFD778", 20))
-        if place == 1:
-            tbd.rounded_rectangle((total_x - 6, row_y + total_y_offset - 4, total_x + total_w + 6, row_y + total_y_offset + total_h + 4), radius=14, outline=_hex_rgba("#FFD98A", 88), width=2)
-            tb = tb.filter(ImageFilter.GaussianBlur(1))
-        img.alpha_composite(tb)
-
-        tt = draw.textbbox((0, 0), total_text, font=total_font)
-        draw.text((total_x + (total_w - (tt[2] - tt[0])) / 2, row_y + total_y_offset + (total_h - (tt[3] - tt[1])) / 2 - 4), total_text, fill=text_main, font=total_font)
+    area_x1, area_y1, area_x2, area_y2 = 80, 640, 1520, 1120
+    draw_glass_card(canvas, bg, (area_x1, area_y1, area_x2, area_y2), radius=28, blur_radius=18, glow_color=(80, 150, 255, 45))
+    rest = decade_leaders[3:10]
+    row_h, gap = 58, 10
+    y = area_y1 + 24
+    for idx, row in enumerate(rest, start=4):
+        if y + row_h > area_y2 - 18:
+            break
+        is_me = bool(highlight_name and str(row.get("name", "")).strip().lower() == str(highlight_name).strip().lower())
+        row_bbox = (area_x1 + 20, y, area_x2 - 20, y + row_h)
+        draw_glass_card(canvas, bg, row_bbox, radius=20, blur_radius=14, border_bright=is_me, glow_color=(75, 210, 255, 60) if is_me else (0, 0, 0, 0))
+        x1, y1, x2, y2 = row_bbox
+        draw.text((x1 + 16, y1 + 10), f"#{idx}", fill=TOKENS["TEXT_PRIMARY"], font=get_font(28, bold=True))
+        avs = 40
+        avx = x1 + 102
+        draw_avatar_circle(canvas, (avx, y1 + 9, avx + avs, y1 + 9 + avs), avatars.get(_safe_int(row.get("telegram_id"))), str(row.get("name", "—")), border_color=(210, 230, 255, 180))
+        name = truncate_text_to_width(draw, str(row.get("name", "—")), get_font(30, bold=True), 430)
+        draw.text((x1 + 170, y1 + 11), name, fill=TOKENS["TEXT_PRIMARY"], font=get_font(30, bold=True))
+        avg = f"{_safe_int(row.get('avg_per_hour'))} ₽/ч" if _safe_float(row.get("total_hours")) and _safe_float(row.get("total_hours")) > 0 else "—"
+        draw.text((x1 + 760, y1 + 14), avg, fill=TOKENS["TEXT_SECONDARY"], font=get_font(24, bold=False))
+        rr_text, rr_color = format_runrate(_safe_float(row.get("run_rate")))
+        draw.text((x1 + 980, y1 + 14), rr_text, fill=rr_color, font=get_font(24, bold=True))
+        draw.text((x2 - 260, y1 + 10), format_money_glass(_safe_int(row.get("total_amount"))), fill=TOKENS["TEXT_PRIMARY"], font=get_font(34, bold=True))
+        y += row_h + gap
 
     out = BytesIO()
     out.name = "leaderboard.png"
-    img.convert("RGB").save(out, format="PNG")
+    canvas.convert("RGB").save(out, format="PNG")
     out.seek(0)
     return out
+
+
+def _build_dashboard_image(mode: str, payload: dict) -> BytesIO | None:
+    if importlib.util.find_spec("PIL") is None:
+        return None
+    from PIL import ImageDraw
+    w, h = 1600, 900
+    bg = create_aurora_background(w, h, seed=333 if mode == "open" else 444)
+    canvas = bg.copy()
+    draw = ImageDraw.Draw(canvas, "RGBA")
+
+    draw_glass_card(canvas, bg, (60, 44, 1540, 126), radius=28, blur_radius=18)
+    draw.text((96, 62), "Дашборд", fill=TOKENS["TEXT_PRIMARY"], font=get_font(42, bold=True))
+    status = "Смена открыта" if mode == "open" else "Смена закрыта"
+    glow = (95, 190, 255, 80) if mode == "open" else (140, 170, 210, 50)
+    draw_glass_card(canvas, bg, (1260, 56, 1490, 106), radius=24, blur_radius=14, glow_color=glow)
+    sb = draw.textbbox((0, 0), status, font=get_font(24, bold=True))
+    draw.text((1260 + (230 - (sb[2]-sb[0]))/2, 67), status, fill=TOKENS["TEXT_PRIMARY"], font=get_font(24, bold=True))
+
+    if mode == "open":
+        _draw_open_dashboard(canvas, bg, payload)
+    else:
+        _draw_closed_dashboard(canvas, bg, payload)
+
+    out = BytesIO()
+    out.name = "dashboard.png"
+    canvas.convert("RGB").save(out, format="PNG")
+    out.seek(0)
+    return out
+
+
+def _draw_open_dashboard(canvas, bg, p: dict) -> None:
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    left = (60, 150, 760, 800)
+    right = (840, 150, 1540, 800)
+    draw_glass_card(canvas, bg, left, radius=34, blur_radius=22, glow_color=(80, 160, 255, 45))
+    draw_glass_card(canvas, bg, right, radius=34, blur_radius=22, glow_color=(140, 110, 255, 45))
+
+    lx1, ly1, lx2, ly2 = left
+    draw.text((lx1 + 36, ly1 + 34), "Текущая смена", fill=TOKENS["TEXT_PRIMARY"], font=get_font(42, bold=True))
+    draw.text((lx1 + 36, ly1 + 84), f"идёт с {p.get('shift_start_label', '—')}", fill=TOKENS['TEXT_SECONDARY'], font=get_font(26, bold=False))
+    draw.text((lx1 + 36, ly1 + 142), "Доход смены", fill=TOKENS['TEXT_DIM'], font=get_font(28, bold=False))
+    draw.text((lx1 + 36, ly1 + 182), format_money_glass(p.get('shift_income')), fill=TOKENS['TEXT_PRIMARY'], font=get_font(68, bold=True))
+    draw_glass_pill(canvas, bg, (lx1 + 36, ly1 + 270, lx1 + 220, ly1 + 316), f"Машин: {_safe_int(p.get('shift_cars'))}", get_font(22, True), TOKENS['TEXT_SECONDARY'])
+    target_txt = f"Цель: {format_money_glass(p.get('shift_target'))}" if _safe_int(p.get('shift_target')) > 0 else "Цель: —"
+    draw_glass_pill(canvas, bg, (lx1 + 232, ly1 + 270, lx1 + 470, ly1 + 316), target_txt, get_font(22, True), TOKENS['TEXT_SECONDARY'])
+
+    progress = p.get('today_progress')
+    draw_progress_bar(canvas, (lx1 + 36, ly1 + 350, lx1 + 596, ly1 + 372), progress)
+    pct = "—" if progress is None else f"{int(progress*100)}%"
+    draw.text((lx1 + 612, ly1 + 338), pct, fill=TOKENS['TEXT_PRIMARY'], font=get_font(30, True))
+
+    boxes = [
+        ("% выполнения", p.get("today_percent_text", "—"), TOKENS['TEXT_PRIMARY']),
+        ("Ранрейт", p.get("runrate_text", "—"), p.get("runrate_color", TOKENS['TEXT_SECONDARY'])),
+        ("Осталось", p.get("remaining_shift_text", "—"), TOKENS['TEXT_PRIMARY']),
+        ("Машин", str(_safe_int(p.get("shift_cars"))), TOKENS['TEXT_PRIMARY']),
+    ]
+    for i, (title, value, color) in enumerate(boxes):
+        col = i % 2
+        row = i // 2
+        bx1 = lx1 + 36 + col * 312
+        by1 = ly1 + 410 + row * 128
+        draw_metric_box(canvas, bg, (bx1, by1, bx1 + 290, by1 + 114), title, value, color)
+
+    rx1, ry1, rx2, ry2 = right
+    draw.text((rx1 + 36, ry1 + 34), "Декада", fill=TOKENS['TEXT_PRIMARY'], font=get_font(42, True))
+    draw.text((rx1 + 36, ry1 + 84), p.get("decade_title", "—"), fill=TOKENS['TEXT_SECONDARY'], font=get_font(25, False))
+    draw.text((rx1 + 36, ry1 + 142), "Заработано", fill=TOKENS['TEXT_DIM'], font=get_font(28, False))
+    draw.text((rx1 + 36, ry1 + 182), format_money_glass(p.get('decade_earned')), fill=TOKENS['TEXT_PRIMARY'], font=get_font(66, True))
+    draw.text((rx1 + 36, ry1 + 256), f"из {format_money_glass(p.get('decade_goal')) if _safe_int(p.get('decade_goal')) > 0 else '—'}", fill=TOKENS['TEXT_SECONDARY'], font=get_font(24, False))
+    draw_progress_bar(canvas, (rx1 + 36, ry1 + 300, rx1 + 596, ry1 + 324), p.get('decade_progress'))
+    dp = p.get('decade_progress')
+    draw.text((rx1 + 612, ry1 + 288), "—" if dp is None else f"{int(dp*100)}%", fill=TOKENS['TEXT_PRIMARY'], font=get_font(30, True))
+
+    metrics = p.get('decade_metrics', [])
+    for i, item in enumerate(metrics[:6]):
+        col = i % 2
+        row = i // 2
+        bx1 = rx1 + 36 + col * 312
+        by1 = ry1 + 360 + row * 128
+        draw_metric_box(canvas, bg, (bx1, by1, bx1 + 290, by1 + 114), item[0], item[1], item[2])
+
+
+def _draw_closed_dashboard(canvas, bg, p: dict) -> None:
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    panel = (110, 150, 1490, 770)
+    draw_glass_card(canvas, bg, panel, radius=36, blur_radius=24, glow_color=(100, 160, 250, 50))
+    x1, y1, x2, y2 = panel
+    draw.text((x1 + 44, y1 + 40), "Прогресс декады", fill=TOKENS['TEXT_PRIMARY'], font=get_font(44, True))
+    draw.text((x1 + 44, y1 + 92), p.get('decade_title', '—'), fill=TOKENS['TEXT_SECONDARY'], font=get_font(26, False))
+    draw.text((x1 + 44, y1 + 152), format_money_glass(p.get('earned')), fill=TOKENS['TEXT_PRIMARY'], font=get_font(72, True))
+    draw.text((x1 + 44, y1 + 236), f"из {format_money_glass(p.get('goal')) if _safe_int(p.get('goal')) > 0 else '—'}", fill=TOKENS['TEXT_SECONDARY'], font=get_font(25, False))
+
+    bubble = (x2 - 300, y1 + 40, x2 - 80, y1 + 260)
+    progress = p.get('progress')
+    glow = (120, 200, 255, 70) if (progress or 0) >= 0.5 else (130, 150, 180, 55)
+    draw_glass_card(canvas, bg, bubble, radius=48, blur_radius=18, glow_color=glow)
+    pct = "—" if progress is None else f"{int(progress * 100)}%"
+    bb = draw.textbbox((0, 0), pct, font=get_font(72, True))
+    bx1, by1, bx2, by2 = bubble
+    draw.text((bx1 + (bx2-bx1-(bb[2]-bb[0]))/2, by1 + 70), pct, fill=TOKENS['TEXT_PRIMARY'], font=get_font(72, True))
+
+    draw_progress_bar(canvas, (x1 + 44, y1 + 300, x2 - 44, y1 + 326), progress)
+
+    metrics = p.get('metrics', [])
+    for i, item in enumerate(metrics[:6]):
+        col = i % 3
+        row = i // 3
+        bw = 410
+        bx = x1 + 44 + col * (bw + 18)
+        by = y1 + 360 + row * 126
+        draw_metric_box(canvas, bg, (bx, by, bx + bw, by + 112), item[0], item[1], item[2])
+
+    mini = p.get('mini', [])
+    for i, item in enumerate(mini[:3]):
+        bx1 = x1 + 44 + i * 286
+        draw_glass_pill(canvas, bg, (bx1, y2 - 74, bx1 + 268, y2 - 26), item, get_font(24, True), TOKENS['TEXT_SECONDARY'])
+
+
+def build_dashboard_image_bytes_open(payload: dict) -> BytesIO | None:
+    return _build_dashboard_image("open", payload)
+
+
+def build_dashboard_image_bytes_closed(payload: dict) -> BytesIO | None:
+    return _build_dashboard_image("closed", payload)
+
+
+
 
 
 def _build_leaderboard_image_fallback(decade_title: str, decade_leaders: list[dict]) -> BytesIO | None:
@@ -4762,6 +4883,34 @@ async def current_shift_message(update: Update, context: CallbackContext):
     active_shift = DatabaseManager.get_active_shift(db_user['id'])
     if not active_shift:
         message = build_decade_progress_dashboard(db_user['id'])
+        image = None
+        try:
+            image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id']))
+        except Exception:
+            logger.exception("dashboard closed image render failed")
+        if image is not None:
+            await update.message.reply_photo(photo=image, filename="dashboard.png", caption="📊 Дашборд")
+        else:
+            await update.message.reply_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 В меню", callback_data="back")],
+                ])
+            )
+        return
+
+    cars = DatabaseManager.get_shift_cars(active_shift['id'])
+    total = DatabaseManager.get_shift_total(active_shift['id'])
+    message = build_current_shift_dashboard(db_user['id'], active_shift, cars, total)
+    image = None
+    try:
+        image = build_dashboard_image_bytes_open(_build_open_dashboard_payload(db_user['id'], active_shift, cars, total))
+    except Exception:
+        logger.exception("dashboard open image render failed")
+    if image is not None:
+        await update.message.reply_photo(photo=image, filename="dashboard.png", caption="📊 Дашборд")
+    else:
         await update.message.reply_text(
             message,
             parse_mode="HTML",
@@ -4769,18 +4918,6 @@ async def current_shift_message(update: Update, context: CallbackContext):
                 [InlineKeyboardButton("🔙 В меню", callback_data="back")],
             ])
         )
-        return
-
-    cars = DatabaseManager.get_shift_cars(active_shift['id'])
-    total = DatabaseManager.get_shift_total(active_shift['id'])
-    message = build_current_shift_dashboard(db_user['id'], active_shift, cars, total)
-    await update.message.reply_text(
-        message,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 В меню", callback_data="back")],
-        ])
-    )
 
 
 async def close_shift_message(update: Update, context: CallbackContext):
