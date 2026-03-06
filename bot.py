@@ -12,6 +12,7 @@ import os
 import calendar
 import re
 import importlib.util
+import random
 from pathlib import Path
 from io import BytesIO
 from typing import List
@@ -4359,13 +4360,13 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
     return out
 
 
-def render_background(image, draw):
+def draw_background(image, draw):
     from PIL import Image, ImageDraw, ImageFilter
 
     width, height = image.size
-    top = (0x3A, 0x00, 0x05)
+    top = (0x2C, 0x00, 0x03)
     mid = (0x5A, 0x00, 0x0A)
-    bot = (0x2A, 0x00, 0x03)
+    bot = (0x1A, 0x00, 0x02)
     for y in range(height):
         t = y / max(height - 1, 1)
         if t < 0.55:
@@ -4374,39 +4375,37 @@ def render_background(image, draw):
         else:
             k = (t - 0.55) / 0.45
             c1, c2 = mid, bot
-        col = (int(c1[0] + (c2[0] - c1[0]) * k), int(c1[1] + (c2[1] - c1[1]) * k), int(c1[2] + (c2[2] - c1[2]) * k), 255)
+        col = (
+            int(c1[0] + (c2[0] - c1[0]) * k),
+            int(c1[1] + (c2[1] - c1[1]) * k),
+            int(c1[2] + (c2[2] - c1[2]) * k),
+            255,
+        )
         draw.line((0, y, width, y), fill=col)
-
-    stripes = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    sd = ImageDraw.Draw(stripes, "RGBA")
-    stripe_color = (0x8B, 0x00, 0x0F, 26)
-    step = 140
-    for x in range(-height, width, step):
-        sd.polygon([(x, 0), (x + 70, 0), (x + height + 70, height), (x + height, height)], fill=stripe_color)
-    image.alpha_composite(stripes)
 
     glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow, "RGBA")
-    cx, cy = width // 2, int(height * 0.40)
-    gd.ellipse((cx - 500, cy - 240, cx + 500, cy + 240), fill=(0xFF, 0xD9, 0x8A, 38))
-    glow = glow.filter(ImageFilter.GaussianBlur(300 / 6))
+    gd.ellipse((width // 2 - 520, 70, width // 2 + 520, 580), fill=(0xFF, 0xD9, 0x8A, 36))
+    glow = glow.filter(ImageFilter.GaussianBlur(34))
     image.alpha_composite(glow)
 
-    sparks = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    pd = ImageDraw.Draw(sparks, "RGBA")
-    for i in range(120):
-        x = (i * 173) % width
-        y = (i * 311) % height
-        r = 2 + (i % 3 == 0)
-        pd.ellipse((x - r, y - r, x + r, y + r), fill=(0xFF, 0xD9, 0x8A, 50))
-    image.alpha_composite(sparks)
+    particles = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    pd = ImageDraw.Draw(particles, "RGBA")
+    rng = random.Random(42)
+    count = max(120, (width * height) // 24000)
+    for _ in range(count):
+        px = rng.randint(0, width - 1)
+        py = rng.randint(0, height - 1)
+        r = rng.randint(2, 4)
+        pd.ellipse((px - r, py - r, px + r, py + r), fill=(0xFF, 0xD9, 0x8A, 38))
+    image.alpha_composite(particles)
 
 
-def render_title(draw, title_font, subtitle_font, width, top, decade_title):
+def draw_title(draw, title_font, subtitle_font, width, top, decade_title):
     title = "LEADERBOARD"
     tb = draw.textbbox((0, 0), title, font=title_font)
     tx = (width - (tb[2] - tb[0])) // 2
-    draw.text((tx + 2, top + 4), title, fill=(245, 199, 106, 70), font=title_font)
+    draw.text((tx + 3, top + 5), title, fill=(245, 199, 106, 88), font=title_font)
     draw.text((tx, top), title, fill=(255, 244, 214, 255), font=title_font)
 
     sub = decade_title
@@ -4441,27 +4440,30 @@ def _gradient_rect(draw, box, c_top, c_mid, c_bot, radius=16, outline=None, widt
         draw.rounded_rectangle(box, radius=radius, outline=outline, width=width)
 
 
-def render_table_header(draw, font, x, y, cols, gap):
-    labels = ["МЕСТО", "СОТРУДНИК", "СРЕДНЕЕ В ЧАС ₽/ч", "RUN RATE", "ИТОГ"]
-    x0 = x
-    widths = cols
-    for label, w in zip(labels, widths):
+def draw_column_headers(draw, font, y):
+    labels = [
+        ("МЕСТО", 120, 190),
+        ("СОТРУДНИК", 280, 450),
+        ("СРЕДНЕЕ В ЧАС ₽/ч", 780, 280),
+        ("RUN RATE", 1030, 230),
+        ("ИТОГ", 1290, 230),
+    ]
+    for label, x0, w in labels:
         _gradient_rect(
             draw,
             (x0, y, x0 + w, y + 64),
-            (0x4A, 0x00, 0x08, 240),
-            (0x3A, 0x00, 0x05, 240),
-            (0x1A, 0x05, 0x05, 245),
+            (0x5A, 0x00, 0x0A, 245),
+            (0x42, 0x00, 0x07, 245),
+            (0x2A, 0x00, 0x03, 248),
             radius=16,
-            outline=(255, 217, 138, 120),
-            width=1,
+            outline=(0xB9, 0x7B, 0x2C, 210),
+            width=2,
         )
         tb = draw.textbbox((0, 0), label, font=font)
         draw.text((x0 + (w - (tb[2] - tb[0])) / 2, y + 18), label, fill=(245, 199, 106, 245), font=font)
-        x0 += w + gap
 
 
-def render_row_panel(base_image, draw, box, place):
+def draw_employee_row(base_image, draw, box, place):
     from PIL import Image, ImageDraw, ImageFilter
 
     x1, y1, x2, y2 = box
@@ -4487,72 +4489,57 @@ def render_row_panel(base_image, draw, box, place):
         outline=(255, 217, 138, 205),
         width=2,
     )
-    draw.rounded_rectangle((x1 + 30, (y1 + y2) // 2 - 2, x2 - 30, (y1 + y2) // 2 + 2), radius=1, fill=(255, 217, 138, 100))
-
-
-def render_rank_block(draw, font, x, y, w, h, place):
+def draw_rank(draw, font, x, y, place):
     color = {1: (255, 217, 138, 255), 2: (217, 217, 217, 255), 3: (194, 122, 58, 255)}.get(place, (255, 244, 214, 245))
     txt = f"#{place}"
     tb = draw.textbbox((0, 0), txt, font=font)
-    draw.text((x + 12, y + (h - (tb[3] - tb[1])) / 2 - 2), txt, fill=color, font=font)
-    if place <= 3:
-        draw.text((x + w - 34, y + 10), "⌂", fill=color, font=font)
+    draw.text((x, y + (118 - (tb[3] - tb[1])) / 2 - 3), txt, fill=color, font=font)
 
 
-def render_avatar(base_image, avatar_image, x, y, size, initials, border_color, is_top1=False):
-    from PIL import Image, ImageDraw, ImageFilter
-
-    if is_top1:
-        glow = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
-        gd = ImageDraw.Draw(glow, "RGBA")
-        gd.ellipse((x - 12, y - 12, x + size + 12, y + size + 12), fill=(255, 215, 120, 90))
-        glow = glow.filter(ImageFilter.GaussianBlur(20 / 2))
-        base_image.alpha_composite(glow)
+def draw_avatar(base_image, avatar_image, x, y, size, initials):
+    from PIL import Image, ImageDraw
 
     avatar = avatar_image.resize((size, size)).convert("RGBA") if avatar_image is not None else _build_fallback_avatar(size, initials)
     mask = Image.new("L", (size, size), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
     base_image.paste(avatar, (x, y), mask)
 
-    ol = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
-    od = ImageDraw.Draw(ol, "RGBA")
-    od.ellipse((x - 2, y - 2, x + size + 2, y + size + 2), outline=border_color, width=3)
-    base_image.alpha_composite(ol)
+    ring = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
+    rd = ImageDraw.Draw(ring, "RGBA")
+    rd.ellipse((x - 2, y - 2, x + size + 2, y + size + 2), outline=(255, 217, 138, 245), width=3)
+    base_image.alpha_composite(ring)
 
 
-def render_employee_block(draw, font, x, y, max_w, name):
+def draw_name(draw, font, x, y, name):
     text = (name or "—").strip() or "—"
-    while len(text) > 1 and draw.textbbox((0, 0), text, font=font)[2] > max_w:
+    if len(text) > 20:
+        text = f"{text[:19]}…"
+    while len(text) > 1 and draw.textbbox((0, 0), text, font=font)[2] > 470:
         text = text[:-2] + "…"
     draw.text((x, y), text, fill=(255, 244, 214, 255), font=font)
 
 
-def render_avg_hour_block(draw, font, x, y, w, h, avg_text):
-    _gradient_rect(draw, (x, y, x + w, y + h), (0x5E, 0x00, 0x08, 245), (0x4A, 0x00, 0x08, 245), (0x3A, 0x00, 0x05, 245), radius=12, outline=(255, 217, 138, 160), width=2)
-    tb = draw.textbbox((0, 0), avg_text, font=font)
-    draw.text((x + (w - (tb[2] - tb[0])) / 2, y + (h - (tb[3] - tb[1])) / 2 - 2), avg_text, fill=(255, 244, 214, 255), font=font)
+def draw_avg_hour(draw, font, x, y, avg_text):
+    draw.text((x, y), avg_text, fill=(247, 211, 140, 255), font=font)
 
 
-def render_run_rate_block(draw, font, x, y, ratio: float | None):
+def draw_runrate(draw, font, x, y, ratio: float | None):
     segments = 8
     sw, sh, gap = 18, 18, 6
     if ratio is None:
-        draw.text((x + 78, y - 4), "—", fill=(233, 211, 167, 230), font=font)
+        draw.text((x + 78, y - 5), "—", fill=(233, 211, 167, 230), font=font)
         return
     filled = int(round(max(0.0, min(ratio, 1.0)) * segments))
     for i in range(segments):
         sx = x + i * (sw + gap)
         col = (255, 215, 107, 235) if i < filled else (58, 26, 18, 255)
         draw.rounded_rectangle((sx, y, sx + sw, y + sh), radius=4, fill=col)
-    pct = f"{int(ratio * 100)}%"
-    draw.text((x + 8 * (sw + gap) + 10, y - 1), pct, fill=(245, 199, 106, 225), font=font)
 
 
-def render_total_block(draw, font, x, y, w, h, total_text, is_top1=False):
+def draw_total(draw, font, x, y, w, h, total_text):
     _gradient_rect(draw, (x, y, x + w, y + h), (0x3A, 0x0B, 0x0B, 245), (0x2B, 0x13, 0x0E, 245), (0x1A, 0x05, 0x05, 250), radius=12, outline=(255, 217, 138, 210), width=2)
-    color = (255, 217, 138, 255) if is_top1 else (255, 244, 214, 255)
     tb = draw.textbbox((0, 0), total_text, font=font)
-    draw.text((x + (w - (tb[2] - tb[0])) / 2, y + (h - (tb[3] - tb[1])) / 2 - 2), total_text, fill=color, font=font)
+    draw.text((x + (w - (tb[2] - tb[0])) / 2, y + (h - (tb[3] - tb[1])) / 2 - 2), total_text, fill=(255, 244, 214, 255), font=font)
 
 
 def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
@@ -4565,62 +4552,59 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
         return None
 
     width = 1600
-    top_pad, bottom_pad, left_pad, right_pad = 80, 80, 80, 80
-    row_height, row_gap = 110, 22
+    padding_top, bottom_pad = 80, 80
+    left_pad, right_pad = 80, 80
+    row_height, row_gap = 118, 22
 
-    cols_raw = [150, 560, 240, 250, 280]
-    content_w = width - left_pad - right_pad
-    scale = content_w / sum(cols_raw)
-    cols = [int(v * scale) for v in cols_raw]
-    cols[-1] += content_w - sum(cols)
+    rank_x = 120
+    avatar_x = 220
+    name_x = 320
+    avg_hour_x = 820
+    runrate_x = 1050
+    total_x = 1320
 
     title_h = 180
     header_h = 100
     users_count = len(decade_leaders)
-    height = top_pad + title_h + header_h + users_count * row_height + max(users_count - 1, 0) * row_gap + bottom_pad
+    height = padding_top + title_h + header_h + users_count * row_height + max(users_count - 1, 0) * row_gap + bottom_pad
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img, "RGBA")
-    render_background(img, draw)
+    draw_background(img, draw)
 
     title_font = _load_rank_font(ImageFont, 90)
     subtitle_font = _load_rank_font(ImageFont, 36)
     header_font = _load_rank_font(ImageFont, 26)
     rank_font = _load_rank_font(ImageFont, 46)
-    name_font = _load_rank_font(ImageFont, 40)
-    avg_font = _load_rank_font(ImageFont, 36)
+    name_font = _load_rank_font(ImageFont, 38)
+    avg_font = _load_rank_font(ImageFont, 42)
+    runrate_font = _load_rank_font(ImageFont, 40)
     total_font = _load_rank_font(ImageFont, 46)
 
-    render_title(draw, title_font, subtitle_font, width, top_pad, decade_title)
+    draw_title(draw, title_font, subtitle_font, width, padding_top, decade_title)
 
-    header_y = top_pad + title_h
-    render_table_header(draw, header_font, left_pad, header_y, [150, 560, 240, 250, 280], gap=10)
+    header_y = padding_top + title_h
+    draw_column_headers(draw, header_font, header_y)
 
     y = header_y + header_h
     avatars = top3_avatars or {}
 
     for place, row in enumerate(decade_leaders, start=1):
-        x = left_pad
-        render_row_panel(img, draw, (left_pad, y, width - right_pad, y + row_height), place)
+        draw_employee_row(img, draw, (left_pad, y, width - right_pad, y + row_height), place)
 
-        render_rank_block(draw, rank_font, x, y, cols[0], row_height, place)
-        x += cols[0]
+        draw_rank(draw, rank_font, rank_x, y, place)
 
         av = avatars.get(int(row.get("telegram_id") or 0))
-        bcol = {1: (255, 217, 138, 255), 2: (217, 217, 217, 255), 3: (194, 122, 58, 255)}.get(place, (255, 217, 138, 210))
-        render_avatar(img, av, x + 12, y + (row_height - 72) // 2, 72, _initials(str(row.get("name", ""))), bcol, is_top1=(place == 1))
-        render_employee_block(draw, name_font, x + 96, y + 32, cols[1] - 108, str(row.get("name", "—")))
-        x += cols[1]
+        draw_avatar(img, av, avatar_x, y + (row_height - 72) // 2, 72, _initials(str(row.get("name", ""))))
+        draw_name(draw, name_font, name_x, y + 38, str(row.get("name", "—")))
 
         avg_text = "—" if float(row.get("total_hours") or 0) <= 0 else f"{format_money(int(row.get('avg_per_hour') or 0))}"
-        render_avg_hour_block(draw, avg_font, x + 10, y + 20, cols[2] - 20, 70, avg_text)
-        x += cols[2]
+        draw_avg_hour(draw, avg_font, avg_hour_x, y + 34, avg_text)
 
         run_rate = row.get("run_rate")
-        render_run_rate_block(draw, header_font, x + 12, y + (row_height - 18) // 2, run_rate)
-        x += cols[3]
+        draw_runrate(draw, runrate_font, runrate_x, y + (row_height - 18) // 2, run_rate)
 
-        render_total_block(draw, total_font, x + 10, y + 16, cols[4] - 20, 78, format_money(int(row.get("total_amount") or 0)), is_top1=(place == 1))
+        draw_total(draw, total_font, total_x, y + 17, 200, 84, format_money(int(row.get("total_amount") or 0)))
 
         y += row_height + row_gap
 
