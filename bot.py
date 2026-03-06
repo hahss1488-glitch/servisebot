@@ -4370,7 +4370,7 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
     gold_dim = _hex_rgba("#E7B35A")
     panel_border = _hex_rgba("#D7A04A", 225)
 
-    title = "LEADERBOARD"
+    title = "ЛИДЕРБОРД"
     tw = draw.textbbox((0, 0), title, font=title_font)
     draw.text(((canvas_width - (tw[2] - tw[0])) / 2, 70), title, fill=text_main, font=title_font)
     sw = draw.textbbox((0, 0), decade_title, font=subtitle_font)
@@ -4477,7 +4477,8 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
             except Exception:
                 av = Image.new("RGBA", (avatar_size, avatar_size), _hex_rgba("#300004"))
 
-        av = ImageOps.fit(av, (avatar_size, avatar_size), method=Image.Resampling.LANCZOS)
+        resampling = getattr(Image, "Resampling", Image)
+        av = ImageOps.fit(av, (avatar_size, avatar_size), method=getattr(resampling, "LANCZOS", Image.LANCZOS))
         mask = Image.new("L", (avatar_size, avatar_size), 0)
         ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
         img.paste(av, (avatar_x, av_y), mask)
@@ -4548,7 +4549,12 @@ async def send_leaderboard_output(chat_target, context: CallbackContext, decade_
         await edit_status(st, "⚠️ Не смог получить часть данных, показал то, что есть.")
 
     await edit_status(st, STATUS_LEADERBOARD[2])
-    image = build_leaderboard_image_bytes(decade_title, decade_leaders, highlight_name, top3_avatars=top3_avatars)
+    try:
+        image = build_leaderboard_image_bytes(decade_title, decade_leaders, highlight_name, top3_avatars=top3_avatars)
+    except Exception:
+        logger.exception("leaderboard image render failed")
+        image = None
+
     if image is not None:
         await done_status(
             st,
