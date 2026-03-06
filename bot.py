@@ -1588,6 +1588,28 @@ async def handle_message(update: Update, context: CallbackContext):
         await send_goal_status(update, context, db_user['id'])
         return
 
+    if context.user_data.get("awaiting_profile_name"):
+        new_name = text.strip()
+        if not new_name:
+            await update.message.reply_text("❌ Имя не может быть пустым. Попробуй ещё раз.")
+            return
+        new_name = " ".join(new_name.split())
+        if len(new_name) > 32:
+            new_name = new_name[:32].rstrip()
+        db_user = DatabaseManager.get_user(user.id)
+        if not db_user:
+            context.user_data.pop("awaiting_profile_name", None)
+            await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
+            return
+        DatabaseManager.update_user_name(db_user["id"], new_name)
+        context.user_data.pop("awaiting_profile_name", None)
+        updated = DatabaseManager.get_user(user.id)
+        await update.message.reply_text(
+            f"✅ Имя обновлено: {new_name}",
+            reply_markup=create_main_reply_keyboard(bool(DatabaseManager.get_active_shift(db_user['id'])), is_subscription_active(updated or db_user)),
+        )
+        return
+
     awaiting_combo_name = context.user_data.get("awaiting_combo_name")
     if awaiting_combo_name:
         name = text.strip()
@@ -1813,6 +1835,7 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "subscription_info": subscription_info_callback,
         "subscription_info_photo": subscription_info_photo_callback,
         "account_info": account_info_callback,
+        "profile_change_name": profile_change_name_callback,
         "show_price": show_price_callback,
         "calendar_open": calendar_callback,
         "nav:back": nav_back_callback,
@@ -2792,8 +2815,20 @@ def build_profile_text(db_user: dict, telegram_id: int) -> str:
 def build_profile_keyboard(db_user: dict, telegram_id: int) -> InlineKeyboardMarkup | None:
     callback = "subscription_info_photo" if get_section_photo_file_id("profile") else "subscription_info"
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Изменить имя", callback_data="profile_change_name")],
         [InlineKeyboardButton("Купить подписку", callback_data=callback)],
     ])
+
+
+async def profile_change_name_callback(query, context):
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+    context.user_data["awaiting_profile_name"] = True
+    await query.edit_message_text(
+        "Введи новое имя для профиля и leaderboard (до 32 символов)."
+    )
 
 
 SECTION_MEDIA_KEYS = {
@@ -4325,47 +4360,158 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
 
 
 def render_background(image, draw):
+    from PIL import Image, ImageDraw, ImageFilter
+
     width, height = image.size
-    top = (34, 42, 61)
-    bottom = (70, 89, 120)
+    top = (0x33, 0x00, 0x00)
+    mid = (0x4A, 0x00, 0x08)
+    bottom = (0x19, 0x00, 0x03)
+
     for y in range(height):
         t = y / max(height - 1, 1)
-        fill = (
-            int(top[0] + (bottom[0] - top[0]) * t),
-            int(top[1] + (bottom[1] - top[1]) * t),
-            int(top[2] + (bottom[2] - top[2]) * t),
+        if t < 0.55:
+            k = t / 0.55
+            c1, c2 = top, mid
+        else:
+            k = (t - 0.55) / 0.45
+            c1, c2 = mid, bottom
+        col = (
+            int(c1[0] + (c2[0] - c1[0]) * k),
+            int(c1[1] + (c2[1] - c1[1]) * k),
+            int(c1[2] + (c2[2] - c1[2]) * k),
             255,
         )
-        draw.line((0, y, width, y), fill=fill)
+        draw.line((0, y, width, y), fill=col)
+
+    geo = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    g = ImageDraw.Draw(geo, "RGBA")
+    polys = [
+        [(0, 160), (420, 0), (680, 0), (180, 340)],
+        [(260, height), (740, 420), (980, 620), (500, height)],
+        [(width - 520, 0), (width, 0), (width, 420), (width - 260, 260)],
+        [(0, height - 320), (300, height - 520), (520, height - 200), (220, height)],
+    ]
+    cols = [(0x5E, 0x00, 0x08, 120), (0x8B, 0x00, 0x0F, 90), (0x2A, 0x07, 0x07, 130), (0xB3, 0x12, 0x17, 70)]
+    for pts, col in zip(polys, cols):
+        g.polygon(pts, fill=col)
+
+    flare = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    f = ImageDraw.Draw(flare, "RGBA")
+    cx, cy = width // 2, int(height * 0.34)
+    f.ellipse((cx - 300, cy - 140, cx + 300, cy + 140), fill=(255, 179, 71, 70))
+    f.ellipse((cx - 210, cy - 95, cx + 210, cy + 95), fill=(255, 217, 138, 68))
+    f.ellipse((cx - 540, cy + 120, cx + 540, cy + 210), fill=(209, 29, 29, 40))
+    flare = flare.filter(ImageFilter.GaussianBlur(26))
+
+    particles = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    pd = ImageDraw.Draw(particles, "RGBA")
+    for i in range(90):
+        x = (i * 191) % width
+        y = (i * 347) % height
+        r = 1 if i % 3 else 2
+        a = 40 if i % 2 else 70
+        pd.ellipse((x - r, y - r, x + r, y + r), fill=(255, 191, 111, a))
+
+    image.alpha_composite(geo)
+    image.alpha_composite(flare)
+    image.alpha_composite(particles)
+    draw.rectangle((0, 0, width, height), fill=(0x12, 0x00, 0x00, 30))
 
 
-def render_panel(draw, x1, y1, x2, y2):
-    draw.rounded_rectangle((x1 + 2, y1 + 8, x2 + 2, y2 + 10), radius=24, fill=(8, 12, 20, 70))
-    draw.rounded_rectangle((x1, y1, x2, y2), radius=24, fill=(255, 255, 255, 68), outline=(255, 255, 255, 120), width=1)
+def render_title(draw, title_font, subtitle_font, width, top, decade_title):
+    title = "LEADERBOARD"
+    box = draw.textbbox((0, 0), title, font=title_font)
+    tw = box[2] - box[0]
+    tx = (width - tw) // 2
+    for off, alpha in ((4, 70), (2, 110)):
+        draw.text((tx, top + off), title, fill=(245, 199, 106, alpha), font=title_font)
+    draw.text((tx, top), title, fill=(255, 244, 214, 255), font=title_font)
+
+    sub = decade_title
+    sb = draw.textbbox((0, 0), sub, font=subtitle_font)
+    sx = (width - (sb[2] - sb[0])) // 2
+    sy = top + (box[3] - box[1]) + 8
+    draw.text((sx, sy), sub, fill=(245, 199, 106, 245), font=subtitle_font)
+
+    line_y = sy + (sb[3] - sb[1]) + 16
+    draw.rounded_rectangle((width // 2 - 340, line_y, width // 2 + 340, line_y + 2), radius=1, fill=(245, 199, 106, 180))
+    draw.ellipse((width // 2 - 26, line_y - 9, width // 2 + 26, line_y + 11), fill=(255, 179, 71, 80))
 
 
-def render_header(draw, title_font, sub_font, x, y, decade_title):
-    draw.text((x, y), f"🏆 Рейтинг сотрудников • {decade_title}", fill=(245, 248, 255, 255), font=title_font)
-    draw.text((x, y + 42), "Карточный leaderboard по сменам текущей декады", fill=(221, 232, 249, 230), font=sub_font)
+def _draw_gradient_round_rect(draw, box, radius, c1, c2, horizontal=False, outline=None, outline_width=1):
+    x1, y1, x2, y2 = box
+    length = max((x2 - x1) if horizontal else (y2 - y1), 1)
+    for i in range(length):
+        t = i / max(length - 1, 1)
+        col = (
+            int(c1[0] + (c2[0] - c1[0]) * t),
+            int(c1[1] + (c2[1] - c1[1]) * t),
+            int(c1[2] + (c2[2] - c1[2]) * t),
+            int(c1[3] + (c2[3] - c1[3]) * t),
+        )
+        if horizontal:
+            draw.rounded_rectangle((x1 + i, y1, x1 + i + 1, y2), radius=radius, fill=col)
+        else:
+            draw.rounded_rectangle((x1, y1 + i, x2, y1 + i + 1), radius=radius, fill=col)
+    if outline:
+        draw.rounded_rectangle(box, radius=radius, outline=outline, width=outline_width)
 
 
-def _income_color(value: int | None) -> tuple[int, int, int, int]:
-    if value is None:
-        return (132, 147, 173, 95)
-    if value >= 5000:
-        return (70, 170, 90, 145)
-    if value >= 4000:
-        return (223, 193, 65, 145)
-    if value >= 3000:
-        return (220, 137, 57, 145)
-    if value >= 2000:
-        return (210, 74, 73, 145)
-    if value >= 1000:
-        return (150, 39, 43, 145)
-    return (110, 20, 42, 145)
+def render_header_tabs(draw, font, x1, y, widths):
+    labels = ["МЕСТО", "СОТРУДНИК", "СРЕДНЕЕ В ЧАС ₽/ч", "ИТОГ"]
+    x = x1
+    for label, w in zip(labels, widths):
+        _draw_gradient_round_rect(
+            draw,
+            (x, y, x + w, y + 60),
+            radius=16,
+            c1=(0x4A, 0x00, 0x08, 230),
+            c2=(0x1A, 0x05, 0x05, 240),
+            outline=(245, 199, 106, 90),
+            outline_width=1,
+        )
+        tb = draw.textbbox((0, 0), label, font=font)
+        draw.text((x + (w - (tb[2] - tb[0])) / 2, y + 16), label, fill=(245, 199, 106, 245), font=font)
+        x += w + 18
 
 
-def render_avatar(base_image, avatar_image, x, y, size, initials):
+def render_row_panel(draw, box, place):
+    x1, y1, x2, y2 = box
+    top3 = {
+        1: ((245, 199, 106, 220), (255, 217, 138, 190)),
+        2: ((217, 217, 217, 210), (189, 191, 199, 180)),
+        3: ((194, 122, 58, 220), (168, 94, 37, 180)),
+    }
+    out1, out2 = top3.get(place, ((179, 76, 50, 140), (120, 46, 34, 130)))
+    _draw_gradient_round_rect(
+        draw,
+        box,
+        radius=22,
+        c1=(0x3A, 0x0B, 0x0B, 235),
+        c2=(0x1A, 0x05, 0x05, 245),
+        outline=out1,
+        outline_width=2 if place <= 3 else 1,
+    )
+    draw.rounded_rectangle((x1 + 2, y1 + 2, x2 - 2, y2 - 2), radius=21, outline=out2, width=1)
+    draw.rounded_rectangle((x1 + 10, y1 + 8, x2 - 10, y1 + 30), radius=12, fill=(255, 190, 120, 20))
+
+
+def render_rank_block(draw, font, x, y, w, h, place):
+    pts = [(x, y + h // 2), (x + 18, y), (x + w, y), (x + w - 12, y + h), (x + 18, y + h)]
+    draw.polygon(pts, fill=(42, 7, 7, 255), outline=(139, 0, 15, 180))
+    rank_color = {
+        1: (245, 199, 106, 255),
+        2: (217, 217, 217, 255),
+        3: (194, 122, 58, 255),
+    }.get(place, (255, 244, 214, 240))
+    label = f"#{place}"
+    draw.text((x + 30, y + 30), label, fill=rank_color, font=font)
+    if place <= 3:
+        trophy = "⌂"
+        draw.text((x + w - 36, y + 12), trophy, fill=rank_color, font=font)
+
+
+def render_avatar(base_image, avatar_image, x, y, size, initials, border_color):
     from PIL import Image, ImageDraw
 
     avatar = avatar_image.resize((size, size)).convert("RGBA") if avatar_image is not None else _build_fallback_avatar(size, initials)
@@ -4373,140 +4519,136 @@ def render_avatar(base_image, avatar_image, x, y, size, initials):
     ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
     base_image.paste(avatar, (x, y), mask)
 
-
-def render_money_cells(draw, font, x, y, max_width, day_values, days, avg_per_hour):
-    cursor_x = x
-    cursor_y = y
-    row_h = 32
-    gap = 8
-    for day in days:
-        val = day_values.get(day)
-        txt = str(val) if val is not None else "—"
-        tw = draw.textbbox((0, 0), txt, font=font)[2]
-        pill_w = max(48, tw + 22)
-        if cursor_x + pill_w > x + max_width:
-            cursor_x = x
-            cursor_y += row_h + gap
-        draw.rounded_rectangle((cursor_x, cursor_y, cursor_x + pill_w, cursor_y + row_h), radius=14, fill=_income_color(val))
-        draw.text((cursor_x + (pill_w - tw) / 2, cursor_y + 6), txt, fill=(248, 250, 255, 255), font=font)
-        cursor_x += pill_w + gap
-
-    avg_txt = f"⚡/ч {format_money(int(avg_per_hour or 0))}"
-    avg_w = draw.textbbox((0, 0), avg_txt, font=font)[2] + 24
-    if cursor_x + avg_w > x + max_width:
-        cursor_x = x
-        cursor_y += row_h + gap
-    draw.rounded_rectangle((cursor_x, cursor_y, cursor_x + avg_w, cursor_y + row_h), radius=14, fill=(56, 96, 185, 138))
-    draw.text((cursor_x + 12, cursor_y + 6), avg_txt, fill=(240, 247, 255, 255), font=font)
-    return cursor_y + row_h
+    overlay = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay, "RGBA")
+    od.ellipse((x - 3, y - 3, x + size + 3, y + size + 3), outline=border_color, width=3)
+    base_image.alpha_composite(overlay)
 
 
-def render_total_column(draw, label_font, total_font, x, y, total_amount):
-    draw.text((x, y), "Итог за декаду:", fill=(31, 40, 61, 235), font=label_font)
-    draw.text((x + 170, y - 2), format_money(int(total_amount or 0)), fill=(15, 22, 38, 255), font=total_font)
+def render_name_block(draw, font, x, y, max_w, name):
+    display = name.strip() or "—"
+    while len(display) > 1 and draw.textbbox((0, 0), display, font=font)[2] > max_w:
+        display = display[:-2] + "…"
+    draw.text((x, y), display, fill=(255, 244, 214, 255), font=font)
 
 
-def render_progress(draw, x, y, width, progress_pct, total_amount, decade_goal, font):
-    pct = max(0, min(int(progress_pct or 0), 200))
-    draw.rounded_rectangle((x, y, x + width, y + 14), radius=7, fill=(33, 45, 71, 95))
-    fill_w = int(width * min(pct, 100) / 100)
-    fill_color = (84, 204, 126, 180) if pct >= 100 else (95, 160, 255, 170)
-    draw.rounded_rectangle((x, y, x + fill_w, y + 14), radius=7, fill=fill_color)
-    if decade_goal > 0:
-        left = max(0, int(decade_goal) - int(total_amount or 0))
-        info = f"Прогресс: {pct}%  •  Осталось: {format_money(left)}"
-    else:
-        info = f"Прогресс: {pct}%  •  Цель декады не задана"
-    draw.text((x, y + 18), info, fill=(233, 241, 255, 238), font=font)
-
-
-def render_employee_row(base_image, draw, fonts, x1, y1, x2, y2, place, row, days, avatars):
-    name_font, cell_font, total_font, tiny_font = fonts
-    border_by_place = {
-        1: (228, 190, 92, 230),
-        2: (188, 196, 210, 228),
-        3: (196, 140, 96, 228),
-    }
-    outline = border_by_place.get(place, (255, 255, 255, 112))
-    draw.rounded_rectangle((x1, y1, x2, y2), radius=20, fill=(255, 255, 255, 82), outline=outline, width=2 if place <= 3 else 1)
-
-    name = str(row.get("name", "—"))
-    display_name = name if len(name) <= 22 else (name[:21] + "…")
-    avatar = avatars.get(int(row.get("telegram_id") or 0))
-    render_avatar(base_image, avatar, x1 + 14, y1 + 14, 44, _initials(name))
-    draw.text((x1 + 70, y1 + 18), f"#{place} {display_name}", fill=(25, 34, 54, 255), font=name_font)
-
-    day_values = row.get("daily_amounts") or {}
-    cells_bottom = render_money_cells(draw, cell_font, x1 + 14, y1 + 66, (x2 - x1) - 28, day_values, days, int(row.get("avg_per_hour") or 0))
-
-    render_total_column(draw, cell_font, total_font, x1 + 14, cells_bottom + 10, int(row.get("total_amount") or 0))
-    render_progress(
+def render_avg_per_hour_block(draw, font, x, y, w, h, avg_per_hour):
+    _draw_gradient_round_rect(
         draw,
-        x1 + 14,
-        cells_bottom + 44,
-        (x2 - x1) - 28,
-        int(row.get("progress_pct") or 0),
-        int(row.get("total_amount") or 0),
-        int(row.get("decade_goal") or 0),
-        tiny_font,
+        (x, y, x + w, y + h),
+        radius=16,
+        c1=(43, 19, 14, 230),
+        c2=(26, 5, 5, 235),
+        outline=(245, 199, 106, 120),
     )
+    text = f"{format_money(int(avg_per_hour or 0))}"
+    tb = draw.textbbox((0, 0), text, font=font)
+    draw.text((x + (w - (tb[2] - tb[0])) / 2, y + (h - (tb[3] - tb[1])) / 2 - 2), text, fill=(245, 199, 106, 255), font=font)
+
+
+def render_segment_progress(draw, x, y, w, h, ratio, segments=8):
+    ratio = max(0.0, min(float(ratio), 1.0))
+    gap = 6
+    sw = int((w - gap * (segments - 1)) / segments)
+    filled = int(round(ratio * segments))
+    for i in range(segments):
+        sx = x + i * (sw + gap)
+        if i < filled:
+            t = i / max(segments - 1, 1)
+            c1, c2 = (240, 179, 64), (255, 241, 181)
+            col = (int(c1[0] + (c2[0] - c1[0]) * t), int(c1[1] + (c2[1] - c1[1]) * t), int(c1[2] + (c2[2] - c1[2]) * t), 235)
+        else:
+            col = (58, 26, 18, 255)
+        draw.rounded_rectangle((sx, y, sx + sw, y + h), radius=5, fill=col)
+
+
+def render_total_block(draw, font, x, y, w, h, total_amount, place):
+    border = (255, 217, 138, 210) if place == 1 else (245, 199, 106, 150)
+    _draw_gradient_round_rect(
+        draw,
+        (x, y, x + w, y + h),
+        radius=18,
+        c1=(0x2B, 0x13, 0x0E, 240),
+        c2=(0x1A, 0x05, 0x05, 245),
+        outline=border,
+        outline_width=2 if place == 1 else 1,
+    )
+    text_color = (255, 217, 138, 255) if place == 1 else (255, 244, 214, 250)
+    txt = format_money(int(total_amount or 0))
+    tb = draw.textbbox((0, 0), txt, font=font)
+    draw.text((x + (w - (tb[2] - tb[0])) / 2, y + (h - (tb[3] - tb[1])) / 2 - 3), txt, fill=text_color, font=font)
 
 
 def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
         return None
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    from PIL import Image, ImageDraw, ImageFont
 
     if not decade_leaders:
         return None
 
-    day_set = sorted({int(day) for row in decade_leaders for day in (row.get("daily_amounts") or {}).keys()})
-    if not day_set:
-        day_set = list(range(1, 11))
-
-    header_h = 104
-    row_h = 212
-    row_gap = 14
-    padding = 26
-    width = 1240
+    width = 1600
+    top_padding = 50
+    title_h = 180
+    header_h = 100
+    row_h = 120
+    row_gap = 20
+    bottom_padding = 50
     users_count = len(decade_leaders)
-    height = header_h + users_count * row_h + max(users_count - 1, 0) * row_gap + padding * 2
+    height = top_padding + title_h + header_h + users_count * row_h + max(users_count - 1, 0) * row_gap + bottom_padding
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img, "RGBA")
     render_background(img, draw)
-    img = img.filter(ImageFilter.GaussianBlur(0.8))
-    draw = ImageDraw.Draw(img, "RGBA")
 
-    title_font = _load_rank_font(ImageFont, 36)
-    sub_font = _load_rank_font(ImageFont, 18)
-    name_font = _load_rank_font(ImageFont, 30)
-    cell_font = _load_rank_font(ImageFont, 20)
-    total_font = _load_rank_font(ImageFont, 26)
-    tiny_font = _load_rank_font(ImageFont, 17)
+    title_font = _load_rank_font(ImageFont, 92)
+    subtitle_font = _load_rank_font(ImageFont, 40)
+    header_font = _load_rank_font(ImageFont, 28)
+    rank_font = _load_rank_font(ImageFont, 44)
+    name_font = _load_rank_font(ImageFont, 40)
+    avg_font = _load_rank_font(ImageFont, 36)
+    total_font = _load_rank_font(ImageFont, 44)
 
-    render_header(draw, title_font, sub_font, padding + 6, 22, decade_title)
+    render_title(draw, title_font, subtitle_font, width, top_padding, decade_title)
 
-    panel_y1 = header_h
-    panel_y2 = height - padding
-    render_panel(draw, padding, panel_y1, width - padding, panel_y2)
+    content_x = 56
+    content_w = width - content_x * 2
+    col_gap = 18
+    col_w = [170, 520, 280, 300]
+    header_y = top_padding + title_h
+    render_header_tabs(draw, header_font, content_x, header_y, col_w)
 
-    y = panel_y1 + 16
+    max_total = max(int(row.get("total_amount") or 0) for row in decade_leaders) or 1
+    y = header_y + header_h
     avatars = top3_avatars or {}
+
     for place, row in enumerate(decade_leaders, start=1):
-        render_employee_row(
-            img,
-            draw,
-            (name_font, cell_font, total_font, tiny_font),
-            padding + 12,
-            y,
-            width - padding - 12,
-            y + row_h,
-            place,
-            row,
-            day_set,
-            avatars,
-        )
+        x1, x2 = content_x, content_x + content_w
+        y2 = y + row_h
+        render_row_panel(draw, (x1, y, x2, y2), place)
+
+        rx = x1 + 14
+        render_rank_block(draw, rank_font, rx, y + 12, 150, row_h - 24, place)
+
+        ax = rx + 170
+        border = {1: (245, 199, 106, 255), 2: (217, 217, 217, 255), 3: (194, 122, 58, 255)}.get(place, (233, 211, 167, 210))
+        avatar = avatars.get(int(row.get("telegram_id") or 0))
+        render_avatar(img, avatar, ax, y + 18, 84, _initials(str(row.get("name", ""))), border)
+
+        nx = ax + 104
+        render_name_block(draw, name_font, nx, y + 34, 380, str(row.get("name", "—")))
+
+        avg_x = content_x + col_w[0] + col_w[1] + col_gap * 2
+        render_avg_per_hour_block(draw, avg_font, avg_x, y + 22, col_w[2], 76, int(row.get("avg_per_hour") or 0))
+
+        prog_x = avg_x + col_w[2] + 20
+        prog_w = 220
+        ratio = int(row.get("total_amount") or 0) / max_total
+        render_segment_progress(draw, prog_x, y + 48, prog_w, 24, ratio, segments=8)
+
+        total_x = content_x + col_w[0] + col_w[1] + col_w[2] + col_gap * 3 + 240
+        render_total_block(draw, total_font, total_x, y + 18, col_w[3], 84, int(row.get("total_amount") or 0), place)
+
         y += row_h + row_gap
 
     out = BytesIO()

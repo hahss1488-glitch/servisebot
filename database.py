@@ -159,6 +159,14 @@ class DatabaseManager:
         conn.close()
 
     @staticmethod
+    def update_user_name(user_id: int, name: str) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET name = ? WHERE id = ?", (str(name).strip(), user_id))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
     def is_user_blocked(user_id: int) -> bool:
         conn = get_connection()
         cur = conn.cursor()
