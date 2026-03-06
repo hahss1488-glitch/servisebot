@@ -468,14 +468,17 @@ def get_decade_index_for_day(day: int) -> int:
 
 
 def build_short_goal_line(user_id: int) -> str:
-    goal = DatabaseManager.get_daily_goal(user_id)
-    if goal <= 0:
-        return "🎯 Цель не задана"
-    today_total = DatabaseManager.get_user_total_for_date(user_id, now_local().strftime("%Y-%m-%d"))
-    percent = calculate_percent(today_total, goal)
+    active_shift = DatabaseManager.get_active_shift(user_id)
+    if not active_shift:
+        return "🎯 Цель смены не задана"
+    shift_target = int(active_shift.get("shift_target") or 0)
+    if shift_target <= 0:
+        return "🎯 Цель смены не задана"
+    shift_total = DatabaseManager.get_shift_total(active_shift["id"])
+    percent = calculate_percent(shift_total, shift_target)
     filled = min(percent // 20, 5)
     bar = "█" * filled + "░" * (5 - filled)
-    return f"🎯 {format_money(today_total)}/{format_money(goal)} {percent}% {bar}"
+    return f"🎯 {format_money(shift_total)}/{format_money(shift_target)} {percent}% {bar}"
 
 
 def format_decade_title(year: int, month: int, decade_index: int) -> str:
@@ -777,31 +780,31 @@ def build_current_shift_dashboard(user_id: int, shift: dict, cars: list[dict], t
     decade_earned_total = int(p["earned_decade"])
     decade_remaining = int(p["remaining"])
     day_plan = int(p["avg_per_shift"])
-    need_today = int(p["need_today"])
+    shift_target = int(shift.get("shift_target") or 0)
     work_units_left = int(p["work_units_left"])
     delta = int(p["delta"])
 
     logger.debug(
-        "dashboard planning metrics user_id=%s days_total=%s days_left_including_today=%s remaining=%s need_today=%s avg_per_day=%s",
+        "dashboard planning metrics user_id=%s work_units_total=%s work_units_left=%s remaining=%s shift_target=%s avg_per_shift=%s",
         user_id,
         p["work_units_total"],
         work_units_left,
         decade_remaining,
-        need_today,
+        shift_target,
         day_plan,
     )
 
-    if need_today > 0:
-        today_percent = calculate_percent(shift_income, need_today)
+    if shift_target > 0:
+        today_percent = calculate_percent(shift_income, shift_target)
         progress_bar = render_bar(today_percent, 10)
-        runrate_to_need_today = (shift_income / need_today) - 1
-        runrate_line = f"⚡ Ранрейт к нужному сегодня: {runrate_to_need_today:+.0%}"
-        today_line = f"{format_money(shift_income)} / {format_money(need_today)} нужно сегодня"
+        runrate_to_need_today = (shift_income / shift_target) - 1
+        runrate_line = f"⚡ Ранрейт к цели смены: {runrate_to_need_today:+.0%}"
+        today_line = f"{format_money(shift_income)} / {format_money(shift_target)}"
     else:
         today_percent = 100
         progress_bar = render_bar(today_percent, 10)
-        runrate_line = "⚡ Ранрейт к нужному сегодня: План закрыт ✅"
-        today_line = f"{format_money(shift_income)} / План закрыт ✅"
+        runrate_line = "⚡ Ранрейт к цели смены: цель не задана"
+        today_line = f"{format_money(shift_income)} / —"
 
     if delta < 0:
         delta_line = f"Отставание на текущий день: -{format_money(abs(delta))}"
@@ -809,17 +812,18 @@ def build_current_shift_dashboard(user_id: int, shift: dict, cars: list[dict], t
         delta_line = f"Опережение: +{format_money(delta)}"
 
     return (
-        "📅 Сегодня:\n"
+        "📅 Текущая смена:\n"
         f"Смена идёт с: {shift_start_label}\n"
         f"Машин: {shift_cars}\n"
-        f"Доход: {today_line}\n"
-        f"% выполнения: {today_percent}%\n"
+        f"Доход смены: {format_money(shift_income)}\n"
+        f"Цель смены: {format_money(shift_target) if shift_target > 0 else '—'}\n"
+        f"% выполнения смены: {today_percent}%\n"
         f"{progress_bar}\n\n"
         "🎯 План декады:\n"
         f"Всего заработано: {format_money(decade_earned_total)} / {format_money(decade_plan_total)}\n"
         f"Осталось: {format_money(decade_remaining)}\n"
         f"Осталось смен (включая текущую): {work_units_left}\n"
-        f"Нужно в день, чтобы успеть: {format_money(need_today)}\n"
+        f"Нужно в смену, чтобы успеть: {format_money(int(p['shift_target_now']))}\n"
         f"Средний план по декаде: {format_money(day_plan)}/смена\n"
         f"{delta_line}\n\n"
         f"{runrate_line}"
@@ -962,32 +966,33 @@ def get_goal_text(user_id: int) -> str:
     shift_total = DatabaseManager.get_shift_total(active_shift["id"]) if active_shift else 0
 
     p = calculate_current_decade_shift_plan(db_user)
-    need_today = int(p["need_today"])
+    shift_target_now = int(p["shift_target_now"])
     decade_plan_total = int(p["decade_goal"])
+    shift_target = int(active_shift.get("shift_target") or 0) if active_shift else shift_target_now
 
     logger.debug(
-        "pinned planning metrics user_id=%s work_units_total=%s work_units_left=%s remaining=%s need_today=%s avg_per_shift=%s shift_id=%s",
+        "pinned planning metrics user_id=%s work_units_total=%s work_units_left=%s remaining=%s shift_target=%s avg_per_shift=%s shift_id=%s",
         user_id,
         p["work_units_total"],
         p["work_units_left"],
         p["remaining"],
-        need_today,
+        shift_target,
         p["avg_per_shift"],
         active_shift["id"] if active_shift else 0,
     )
 
     if decade_plan_total <= 0:
         return ""
-    percent = 100 if need_today == 0 else calculate_percent(int(shift_total), need_today)
+    percent = 100 if shift_target == 0 else calculate_percent(int(shift_total), shift_target)
     bar = render_bar(percent, 10)
     if not active_shift:
-        return f"Цель: {format_money(0)} / {format_money(need_today)}\nСмена не открыта {bar}"
-    return f"Цель: {format_money(int(shift_total))} / {format_money(need_today)} {bar}"
+        return f"Цель смены: {format_money(0)} / {format_money(shift_target)}\nСмена не открыта {bar}"
+    return f"Цель смены: {format_money(int(shift_total))} / {format_money(shift_target)} {bar}"
 
 
-def calculate_current_decade_daily_goal(db_user: dict) -> int:
+def calculate_current_decade_shift_target(db_user: dict) -> int:
     plan = calculate_current_decade_shift_plan(db_user)
-    return int(plan["need_today"])
+    return int(plan["shift_target_now"])
 
 
 def calculate_current_decade_shift_plan(db_user: dict) -> dict:
@@ -1023,7 +1028,7 @@ def calculate_current_decade_shift_plan(db_user: dict) -> dict:
     denom_total = max(1, work_units_total)
     denom_left = max(1, work_units_left)
     avg_per_shift = int((decade_goal + denom_total - 1) / denom_total) if decade_goal > 0 else 0
-    need_today = int((remaining + denom_left - 1) / denom_left) if remaining > 0 else 0
+    shift_target_now = int((remaining + denom_left - 1) / denom_left) if remaining > 0 else 0
     planned_by_today = avg_per_shift * max(1, work_units_elapsed)
     delta = earned - planned_by_today
 
@@ -1034,9 +1039,19 @@ def calculate_current_decade_shift_plan(db_user: dict) -> dict:
         "work_units_total": work_units_total,
         "work_units_left": work_units_left,
         "avg_per_shift": avg_per_shift,
-        "need_today": need_today,
+        "shift_target_now": shift_target_now,
         "delta": delta,
     }
+
+
+def init_shift_target(db_user: dict, shift_id: int) -> int:
+    if not DatabaseManager.is_goal_enabled(db_user["id"]):
+        DatabaseManager.set_shift_target(shift_id, 0)
+        return 0
+    shift_target = calculate_current_decade_shift_target(db_user)
+    DatabaseManager.set_shift_target(shift_id, shift_target)
+    DatabaseManager.set_shift_goal(db_user["id"], shift_target)
+    return shift_target
 
 
 def get_edit_mode(context: CallbackContext, car_id: int) -> bool:
@@ -1561,14 +1576,15 @@ async def handle_message(update: Update, context: CallbackContext):
             return
         DatabaseManager.set_decade_goal(db_user["id"], goal_value)
         DatabaseManager.set_goal_enabled(db_user["id"], True)
-        daily_goal = calculate_current_decade_daily_goal(db_user)
-        DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
         context.user_data.pop("awaiting_decade_goal", None)
         has_active = DatabaseManager.get_active_shift(db_user['id']) is not None
         await update.message.reply_text(
-            "✅ Цель дня обновлена.",
+            "✅ Цель смены обновлена.",
             reply_markup=create_main_reply_keyboard(has_active)
         )
+        active_shift = DatabaseManager.get_active_shift(db_user["id"])
+        if active_shift:
+            init_shift_target(db_user, int(active_shift["id"]))
         await send_goal_status(update, context, db_user['id'])
         return
 
@@ -1661,7 +1677,7 @@ async def handle_message(update: Update, context: CallbackContext):
                 "Вы можете указать денежную цель для каждой декады.\n"
                 "Исходя из этой цели бот автоматически рассчитает сколько нужно зарабатывть каждую смену чтобы к концу декады вышла эта сумма.\n\n"
                 "Бот из указанной цели вычитает уже заработанную сумму за эту декаду, делит на количество оставшихся рабочих дней указанных в календаре для текущей декады (как основных, так и запланированных доп. смен) и дает динамичный расчет цели дня.\n\n"
-                "При открытии смены в закрепленном сообщении будет появляться цель дня, та самая рассчитая сумма по формуле выше.\n\n"
+                "При открытии смены в закрепленном сообщении будет появляться цель смены, та самая рассчитая сумма по формуле выше.\n\n"
                 "Укажите цель декады. Например: 35000"
             )
             return
@@ -1965,7 +1981,8 @@ def open_shift_core(db_user: dict) -> tuple[bool, str, bool]:
         time_text = start_time.strftime('%H:%M %d.%m') if start_time else "неизвестно"
         return False, f"❌ У вас уже есть активная смена!\nНачата: {time_text}", False
 
-    DatabaseManager.start_shift(db_user['id'])
+    shift_id = DatabaseManager.start_shift(db_user['id'])
+    init_shift_target(db_user, shift_id)
     today = now_local().date()
     marked_extra = False
     if get_work_day_type(db_user, today) == "off":
@@ -1998,8 +2015,6 @@ async def open_shift(query, context):
         reply_markup=main_menu_for_db_user(db_user, True)
     )
     if DatabaseManager.is_goal_enabled(db_user["id"]):
-        daily_goal = calculate_current_decade_daily_goal(db_user)
-        DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
         await send_goal_status(None, context, db_user['id'], source_message=query.message)
 
 async def add_car(query, context):
@@ -2694,8 +2709,6 @@ async def calendar_set_day_type_callback(query, context, data):
         raise
 
     if DatabaseManager.is_goal_enabled(db_user["id"]):
-        daily_goal = calculate_current_decade_daily_goal(db_user)
-        DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
         await send_goal_status(None, context, db_user["id"], source_message=query.message)
 
 
@@ -3917,8 +3930,6 @@ async def close_shift_confirm_yes(query, context, data):
     if not cars:
         DatabaseManager.delete_shift(shift_id)
         if DatabaseManager.is_goal_enabled(db_user["id"]):
-            daily_goal = calculate_current_decade_daily_goal(db_user)
-            DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
             await send_goal_status(None, context, db_user["id"], source_message=query.message)
         await query.edit_message_text("🗑️ Пустая смена удалена и не сохранена в истории.")
         await query.message.reply_text(
@@ -3929,8 +3940,6 @@ async def close_shift_confirm_yes(query, context, data):
 
     DatabaseManager.close_shift(shift_id)
     if DatabaseManager.is_goal_enabled(db_user["id"]):
-        daily_goal = calculate_current_decade_daily_goal(db_user)
-        DatabaseManager.set_daily_goal(db_user["id"], daily_goal)
         await send_goal_status(None, context, db_user["id"], source_message=query.message)
     closed_shift = DatabaseManager.get_shift(shift_id) or shift
     message = build_closed_shift_dashboard(closed_shift, cars, total)
@@ -3974,14 +3983,14 @@ async def go_back(query, context):
     )
 
 async def change_goal(query, context):
-    """Запрос цели дня"""
+    """Запрос цели смены"""
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user or not DatabaseManager.get_active_shift(db_user['id']):
-        await query.edit_message_text("🎯 Цель дня доступна только при открытой смене.")
+        await query.edit_message_text("🎯 Цель смены доступна только при открытой смене.")
         return
     context.user_data['awaiting_goal'] = True
     await query.edit_message_text(
-        "Введи цель дня суммой, например: 5000"
+        "Введи цель смены суммой, например: 5000"
     )
 
 async def change_decade_goal(query, context):
@@ -3993,7 +4002,7 @@ async def change_decade_goal(query, context):
 
     if DatabaseManager.is_goal_enabled(db_user["id"]):
         DatabaseManager.set_goal_enabled(db_user["id"], False)
-        DatabaseManager.set_daily_goal(db_user["id"], 0)
+        DatabaseManager.set_shift_goal(db_user["id"], 0)
         await disable_goal_status(context, db_user["id"])
         await query.edit_message_text(
             "✅ Цель декады выключена.",
@@ -4075,6 +4084,15 @@ def _build_fallback_avatar(size: int, initials: str):
     box = draw.textbbox((0, 0), text, font=font)
     draw.text(((size - (box[2] - box[0])) / 2, (size - (box[3] - box[1])) / 2), text, fill="#EAF0FF", font=font)
     return img
+
+
+def _initials(name: str) -> str:
+    parts = [p for p in str(name or "").replace("_", " ").split() if p]
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][:1] + parts[1][:1]).upper()
 def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
         return None
@@ -4306,6 +4324,168 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
     return out
 
 
+def render_background(image, draw):
+    width, height = image.size
+    top = (70, 90, 118)
+    bottom = (167, 184, 204)
+    for y in range(height):
+        t = y / max(height - 1, 1)
+        fill = (
+            int(top[0] + (bottom[0] - top[0]) * t),
+            int(top[1] + (bottom[1] - top[1]) * t),
+            int(top[2] + (bottom[2] - top[2]) * t),
+            255,
+        )
+        draw.line((0, y, width, y), fill=fill)
+
+
+def render_glass_panel(draw, x1, y1, x2, y2):
+    draw.rounded_rectangle((x1 + 2, y1 + 6, x2 + 2, y2 + 10), radius=24, fill=(18, 25, 40, 45))
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=24, fill=(255, 255, 255, 76), outline=(255, 255, 255, 126), width=1)
+
+
+def render_heat_cell(draw, x1, y1, x2, y2, value):
+    if value is None:
+        return
+    if value >= 5000:
+        c = (70, 170, 90, 120)
+    elif value >= 4000:
+        c = (223, 193, 65, 120)
+    elif value >= 3000:
+        c = (220, 137, 57, 120)
+    elif value >= 2000:
+        c = (210, 74, 73, 120)
+    elif value >= 1000:
+        c = (150, 39, 43, 120)
+    else:
+        c = (110, 20, 42, 120)
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=14, fill=c)
+
+
+def render_avatar(base_image, avatar_image, x, y, size, initials):
+    from PIL import Image, ImageDraw
+    avatar = (avatar_image.resize((size, size)).convert("RGBA") if avatar_image is not None else _build_fallback_avatar(size, initials))
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+    base_image.paste(avatar, (x, y), mask)
+
+
+def render_header(draw, title_font, sub_font, x, y, decade_title):
+    draw.text((x, y), f"📊 Рейтинг сотрудников · {decade_title}", fill=(244, 247, 255, 255), font=title_font)
+    draw.text((x, y + 40), "Карточный leaderboard по сменам текущей декады", fill=(230, 238, 252, 220), font=sub_font)
+
+
+def render_shift_cells(draw, font, x, y, max_width, day_values, days):
+    cursor_x = x
+    cursor_y = y
+    row_h = 34
+    gap = 8
+    for day in days:
+        val = day_values.get(day)
+        text = str(val) if val is not None else "—"
+        text_w = draw.textbbox((0, 0), text, font=font)[2]
+        pill_w = max(50, text_w + 20)
+        if cursor_x + pill_w > x + max_width:
+            cursor_x = x
+            cursor_y += row_h + gap
+        render_heat_cell(draw, cursor_x, cursor_y, cursor_x + pill_w, cursor_y + row_h, val)
+        draw.text((cursor_x + (pill_w - text_w) / 2, cursor_y + 7), text, fill=(248, 250, 255, 255), font=font)
+        cursor_x += pill_w + gap
+    return cursor_y + row_h
+
+
+def render_total(draw, font, bold_font, x, y, total):
+    label = "Итого:"
+    value = format_money(int(total or 0))
+    draw.text((x, y), label, fill=(38, 48, 70, 230), font=font)
+    draw.text((x + 78, y - 2), value, fill=(20, 28, 46, 255), font=bold_font)
+
+
+def render_employee_card(base_image, draw, fonts, x1, y1, x2, y2, place, row, days, avatars):
+    font, small_font, bold_font = fonts
+    top_borders = {
+        1: (211, 174, 94, 220),
+        2: (176, 184, 198, 220),
+        3: (176, 127, 92, 220),
+    }
+    outline = top_borders.get(place, (255, 255, 255, 120))
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=20, fill=(255, 255, 255, 84), outline=outline, width=2 if place <= 3 else 1)
+
+    name = str(row.get("name", "—"))
+    avatar = avatars.get(int(row.get("telegram_id") or 0))
+    avatar_size = 42
+    render_avatar(base_image, avatar, x1 + 14, y1 + 14, avatar_size, _initials(name))
+    draw.text((x1 + 70, y1 + 16), f"#{place} {name}", fill=(26, 34, 54, 255), font=font)
+
+    day_values = row.get("daily_amounts") or {}
+    cells_bottom = render_shift_cells(draw, small_font, x1 + 14, y1 + 66, (x2 - x1) - 28, day_values, days)
+    render_total(draw, small_font, bold_font, x1 + 14, cells_bottom + 10, int(row.get("total_amount", 0)))
+
+
+def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
+    if importlib.util.find_spec("PIL") is None:
+        return None
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+    if not decade_leaders:
+        return None
+
+    day_set = sorted({int(day) for row in decade_leaders for day in (row.get("daily_amounts") or {}).keys()})
+    if not day_set:
+        day_set = list(range(1, 11))
+
+    header_h = 96
+    card_h = 174
+    card_gap = 14
+    padding = 26
+    users_count = len(decade_leaders)
+    height = header_h + users_count * card_h + max(users_count - 1, 0) * card_gap + padding * 2
+
+    width = 1160
+
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+    draw = ImageDraw.Draw(img, "RGBA")
+    render_background(img, draw)
+    img = img.filter(ImageFilter.GaussianBlur(0.6))
+    draw = ImageDraw.Draw(img, "RGBA")
+
+    title_font = _load_rank_font(ImageFont, 34)
+    sub_font = _load_rank_font(ImageFont, 18)
+    card_font = _load_rank_font(ImageFont, 28)
+    card_small_font = _load_rank_font(ImageFont, 20)
+    total_bold_font = _load_rank_font(ImageFont, 24)
+
+    render_header(draw, title_font, sub_font, padding + 6, 20, decade_title)
+
+    panel_y1 = header_h
+    panel_y2 = height - padding
+    render_glass_panel(draw, padding, panel_y1, width - padding, panel_y2)
+
+    y = panel_y1 + 16
+    avatars = top3_avatars or {}
+    for place, row in enumerate(decade_leaders, start=1):
+        render_employee_card(
+            img,
+            draw,
+            (card_font, card_small_font, total_bold_font),
+            padding + 14,
+            y,
+            width - padding - 14,
+            y + card_h,
+            place,
+            row,
+            day_set,
+            avatars,
+        )
+        y += card_h + card_gap
+
+    out = BytesIO()
+    out.name = "leaderboard.png"
+    img.convert("RGB").save(out, format="PNG")
+    out.seek(0)
+    return out
+
+
 async def send_leaderboard_output(chat_target, context: CallbackContext, decade_title: str, decade_leaders: list[dict], reply_markup=None, highlight_name: str | None = None):
     text_message = build_leaderboard_text(decade_title, decade_leaders)
     # live statuses
@@ -4321,15 +4501,14 @@ async def send_leaderboard_output(chat_target, context: CallbackContext, decade_
     top3_avatars: dict[int, object] = {}
     try:
         tasks = []
-        top3 = decade_leaders[:3]
-        for place, leader in enumerate(top3, start=1):
+        for leader in decade_leaders:
             uid = int(leader.get("telegram_id") or 0)
             name = str(leader.get("name", ""))
-            tasks.append(get_avatar_image_async(context.bot, uid, 140 if place == 1 else 112, fallback_name=name))
+            tasks.append(get_avatar_image_async(context.bot, uid, 44, fallback_name=name))
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for place, res in enumerate(results, start=1):
+        for leader, res in zip(decade_leaders, results):
             if not isinstance(res, Exception):
-                top3_avatars[place] = res
+                top3_avatars[int(leader.get("telegram_id") or 0)] = res
     except Exception:
         await edit_status(st, "⚠️ Не смог получить часть данных, показал то, что есть.")
 
@@ -4370,7 +4549,7 @@ async def leaderboard(query, context):
     """Топ героев: лидеры текущей декады"""
     today = now_local().date()
     idx, _, _, _, decade_title = get_decade_period(today)
-    decade_leaders = DatabaseManager.get_decade_leaderboard(today.year, today.month, idx)
+    decade_leaders = DatabaseManager.get_decade_leaderboard_daily(today.year, today.month, idx)
 
     db_user = DatabaseManager.get_user(query.from_user.id)
     has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
@@ -4390,7 +4569,7 @@ async def reset_data_prompt(query, context):
     await query.edit_message_text(
         "⚠️ Вы точно хотите полностью сбросить аккаунт?\n\n"
 
-        "Будут удалены: все смены, машины, услуги, комбо, цель дня и история.",
+        "Будут удалены: все смены, машины, услуги, комбо, цель смены и история.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Да, удалить всё", callback_data="reset_data_yes")],
             [InlineKeyboardButton("❌ Нет", callback_data="reset_data_no")],
@@ -4543,7 +4722,7 @@ async def settings_message(update: Update, context: CallbackContext):
 async def leaderboard_message(update: Update, context: CallbackContext):
     today = now_local().date()
     idx, _, _, _, decade_title = get_decade_period(today)
-    decade_leaders = DatabaseManager.get_decade_leaderboard(today.year, today.month, idx)
+    decade_leaders = DatabaseManager.get_decade_leaderboard_daily(today.year, today.month, idx)
 
     db_user = DatabaseManager.get_user(update.effective_user.id)
     has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))

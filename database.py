@@ -37,6 +37,7 @@ def init_database():
         start_time TIMESTAMP NOT NULL,
         end_time TIMESTAMP,
         status TEXT DEFAULT 'active',
+        shift_target INTEGER DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
     
@@ -123,6 +124,13 @@ def init_database():
         cur.execute("ALTER TABLE user_settings ADD COLUMN work_anchor_date TEXT DEFAULT ''")
     if "decade_goal" not in columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN decade_goal INTEGER DEFAULT 0")
+    if "shift_goal" not in columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN shift_goal INTEGER DEFAULT 0")
+
+    cur.execute("PRAGMA table_info(shifts)")
+    shift_columns = {row[1] for row in cur.fetchall()}
+    if "shift_target" not in shift_columns:
+        cur.execute("ALTER TABLE shifts ADD COLUMN shift_target INTEGER DEFAULT 0")
     
     conn.commit()
     conn.close()
@@ -206,6 +214,14 @@ class DatabaseManager:
         conn.commit()
         conn.close()
         return shift_id
+
+    @staticmethod
+    def set_shift_target(shift_id: int, shift_target: int) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE shifts SET shift_target = ? WHERE id = ?", (int(shift_target or 0), shift_id))
+        conn.commit()
+        conn.close()
 
     @staticmethod
     def get_active_shift(user_id: int) -> Optional[Dict]:
@@ -323,6 +339,17 @@ class DatabaseManager:
         return 0
 
     @staticmethod
+    def get_shift_goal(user_id: int) -> int:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT shift_goal FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        if row and row["shift_goal"] is not None:
+            return int(row["shift_goal"])
+        return 0
+
+    @staticmethod
     def set_daily_goal(user_id: int, goal: int):
         conn = get_connection()
         cur = conn.cursor()
@@ -331,6 +358,19 @@ class DatabaseManager:
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET daily_goal = excluded.daily_goal""",
             (user_id, goal)
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def set_shift_goal(user_id: int, goal: int):
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO user_settings (user_id, shift_goal)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET shift_goal = excluded.shift_goal""",
+            (user_id, int(goal or 0))
         )
         conn.commit()
         conn.close()
@@ -478,7 +518,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT u.name,
+            """SELECT u.name, u.telegram_id,
             COUNT(DISTINCT s.id) as shift_count,
             COALESCE(SUM(c.total_amount), 0) as total_amount
             FROM users u
@@ -496,6 +536,66 @@ class DatabaseManager:
         rows = cur.fetchall()
         conn.close()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def get_decade_leaderboard_daily(year: int, month: int, decade_index: int, limit: int = 10) -> List[Dict]:
+        if decade_index == 1:
+            start_day, end_day = 1, 10
+        elif decade_index == 2:
+            start_day, end_day = 11, 20
+        else:
+            start_day, end_day = 21, calendar.monthrange(year, month)[1]
+
+        start_date = f"{year:04d}-{month:02d}-{start_day:02d}"
+        end_date = f"{year:04d}-{month:02d}-{end_day:02d}"
+
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT u.id as user_id, u.name, u.telegram_id,
+            COALESCE(SUM(c.total_amount), 0) as total_amount,
+            COUNT(DISTINCT s.id) as shift_count
+            FROM users u
+            JOIN shifts s ON s.user_id = u.id
+            JOIN cars c ON c.shift_id = s.id
+            LEFT JOIN user_settings us ON us.user_id = u.id
+            WHERE COALESCE(us.is_blocked, 0) = 0
+              AND COALESCE(us.include_in_leaderboard, 1) = 1
+              AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)
+            GROUP BY u.id
+            ORDER BY total_amount DESC
+            LIMIT ?""",
+            (start_date, end_date, limit)
+        )
+        users = [dict(row) for row in cur.fetchall()]
+        if not users:
+            conn.close()
+            return []
+
+        user_ids = [u["user_id"] for u in users]
+        placeholders = ",".join("?" for _ in user_ids)
+        cur.execute(
+            f"""SELECT s.user_id as user_id,
+            CAST(strftime('%d', date(c.created_at, '+3 hours')) AS INTEGER) as day,
+            COALESCE(SUM(c.total_amount), 0) as total_amount
+            FROM cars c
+            JOIN shifts s ON s.id = c.shift_id
+            WHERE s.user_id IN ({placeholders})
+              AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)
+            GROUP BY s.user_id, day""",
+            [*user_ids, start_date, end_date]
+        )
+        per_day = cur.fetchall()
+        conn.close()
+
+        day_map: Dict[int, Dict[int, int]] = {}
+        for row in per_day:
+            uid = int(row["user_id"])
+            day_map.setdefault(uid, {})[int(row["day"])] = int(row["total_amount"] or 0)
+
+        for row in users:
+            row["daily_amounts"] = day_map.get(int(row["user_id"]), {})
+        return users
 
     @staticmethod
     def is_user_in_leaderboard(user_id: int) -> bool:
@@ -945,10 +1045,11 @@ class DatabaseManager:
         cur.execute("DELETE FROM shifts WHERE user_id = ?", (user_id,))
         cur.execute("DELETE FROM user_combos WHERE user_id = ?", (user_id,))
         cur.execute(
-            """INSERT INTO user_settings (user_id, daily_goal, decade_goal, price_mode, last_decade_notified)
-            VALUES (?, 0, 0, 'day', '')
+            """INSERT INTO user_settings (user_id, daily_goal, shift_goal, decade_goal, price_mode, last_decade_notified)
+            VALUES (?, 0, 0, 0, 'day', '')
             ON CONFLICT(user_id) DO UPDATE SET
                 daily_goal = 0,
+                shift_goal = 0,
                 decade_goal = 0,
                 price_mode = 'day',
                 last_decade_notified = ''""",
