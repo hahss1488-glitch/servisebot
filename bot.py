@@ -4194,7 +4194,7 @@ def draw_background(image, draw):
         t = y / max(height - 1, 1)
         if t <= 0.56:
             k = t / 0.56
-            c1, c2 = bg_top, bg_mid
+            c1, c2 = top, mid
         else:
             k = (t - 0.56) / 0.44
             c1, c2 = bg_mid, bg_bottom
