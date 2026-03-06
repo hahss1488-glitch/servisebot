@@ -4478,7 +4478,15 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
                 av = Image.new("RGBA", (avatar_size, avatar_size), _hex_rgba("#300004"))
 
         resampling = getattr(Image, "Resampling", Image)
-        av = ImageOps.fit(av, (avatar_size, avatar_size), method=getattr(resampling, "LANCZOS", Image.LANCZOS))
+        lanczos = getattr(resampling, "LANCZOS", None)
+        if lanczos is None:
+            lanczos = getattr(Image, "LANCZOS", None)
+        if lanczos is None:
+            lanczos = getattr(Image, "ANTIALIAS", getattr(Image, "BICUBIC", 3))
+        try:
+            av = ImageOps.fit(av, (avatar_size, avatar_size), method=lanczos)
+        except TypeError:
+            av = ImageOps.fit(av, (avatar_size, avatar_size), lanczos)
         mask = Image.new("L", (avatar_size, avatar_size), 0)
         ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
         img.paste(av, (avatar_x, av_y), mask)
@@ -4522,6 +4530,44 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
     return out
 
 
+def _build_leaderboard_image_fallback(decade_title: str, decade_leaders: list[dict]) -> BytesIO | None:
+    if importlib.util.find_spec("PIL") is None:
+        return None
+    from PIL import Image, ImageDraw, ImageFont
+
+    width = 1400
+    row_h = 68
+    top = 120
+    height = top + max(1, len(decade_leaders)) * row_h + 60
+    img = Image.new("RGB", (width, height), "#2A0003")
+    draw = ImageDraw.Draw(img)
+
+    title_font = _load_rank_font(ImageFont, 58)
+    line_font = _load_rank_font(ImageFont, 36)
+    small_font = _load_rank_font(ImageFont, 28)
+
+    draw.text((70, 26), "ЛИДЕРБОРД", fill="#FFD98A", font=title_font)
+    draw.text((70, 82), decade_title, fill="#F5C76A", font=small_font)
+
+    y = top
+    for i, row in enumerate(decade_leaders, start=1):
+        draw.rectangle((60, y, width - 60, y + row_h - 8), outline="#D7A04A", width=2, fill="#300004")
+        name = str(row.get("name", "—"))
+        avg = "—" if float(row.get("total_hours") or 0) <= 0 else f"{int(row.get('avg_per_hour') or 0)} ₽"
+        total = format_money(int(row.get("total_amount") or 0))
+        draw.text((86, y + 12), f"#{i}", fill="#FFF1D2", font=line_font)
+        draw.text((190, y + 12), name, fill="#FFF1D2", font=line_font)
+        draw.text((820, y + 12), avg, fill="#F7D38C", font=line_font)
+        draw.text((1150, y + 12), total, fill="#FFD98A", font=line_font)
+        y += row_h
+
+    out = BytesIO()
+    out.name = "leaderboard.png"
+    img.save(out, format="PNG")
+    out.seek(0)
+    return out
+
+
 async def send_leaderboard_output(chat_target, context: CallbackContext, decade_title: str, decade_leaders: list[dict], reply_markup=None, highlight_name: str | None = None):
     text_message = build_leaderboard_text(decade_title, decade_leaders)
     # live statuses
@@ -4554,6 +4600,9 @@ async def send_leaderboard_output(chat_target, context: CallbackContext, decade_
     except Exception:
         logger.exception("leaderboard image render failed")
         image = None
+
+    if image is None:
+        image = _build_leaderboard_image_fallback(decade_title, decade_leaders)
 
     if image is not None:
         await done_status(
