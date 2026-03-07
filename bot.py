@@ -237,6 +237,10 @@ def is_admin_telegram(telegram_id: int) -> bool:
     return telegram_id in ADMIN_TELEGRAM_IDS
 
 
+def is_user_banned_telegram(telegram_id: int) -> bool:
+    return DatabaseManager.is_telegram_banned(telegram_id)
+
+
 def is_user_blocked(db_user: dict | None) -> bool:
     return bool(db_user and DatabaseManager.is_user_blocked(db_user["id"]))
 
@@ -281,6 +285,9 @@ def is_subscription_active(db_user: dict | None) -> bool:
 
 
 def resolve_user_access(telegram_id: int, context: CallbackContext | None = None) -> tuple[dict | None, bool, bool]:
+    if is_user_banned_telegram(telegram_id):
+        return None, True, False
+
     db_user = DatabaseManager.get_user(telegram_id)
     if not db_user:
         return None, False, False
@@ -599,6 +606,7 @@ TOOLS_COMBO = "🧩 Комбо"
 TOOLS_DECADE_GOAL = "🎯 Цель декады"
 TOOLS_RESET = "🗑️ Сброс всех данных"
 TOOLS_ADMIN = "🛡️ Админ панель"
+TOOLS_TOGGLE_IMAGES = "🖼 Убрать картинки"
 TOOLS_BACK = "🔙 Назад"
 
 
@@ -639,6 +647,7 @@ def create_tools_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
         [KeyboardButton(TOOLS_PRICE), KeyboardButton(TOOLS_CALENDAR)],
         [KeyboardButton(TOOLS_HISTORY), KeyboardButton(TOOLS_COMBO)],
         [KeyboardButton(TOOLS_DECADE_GOAL), KeyboardButton(TOOLS_RESET)],
+        [KeyboardButton(TOOLS_TOGGLE_IMAGES)],
     ]
     if is_admin:
         keyboard.append([KeyboardButton(TOOLS_ADMIN)])
@@ -1449,6 +1458,10 @@ async def start_command(update: Update, context: CallbackContext):
     user = update.effective_user
 
     if update.message:
+        if is_user_banned_telegram(user.id):
+            await update.message.reply_text("⛔ Ваш профиль заблокирован навсегда. Доступ к боту закрыт.")
+            return
+
         db_user = DatabaseManager.get_user(user.id)
 
         is_new_user = False
@@ -1525,6 +1538,7 @@ def create_tools_inline_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup
         [InlineKeyboardButton("🧩 Комбо", callback_data="combo_settings")],
         [InlineKeyboardButton("🎯 Цель декады", callback_data="change_decade_goal")],
         [InlineKeyboardButton("🗑️ Сброс всех данных", callback_data="reset_data")],
+        [InlineKeyboardButton("🖼 Убрать картинки", callback_data="toggle_images_mode")],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton("🛡️ Админ панель", callback_data="admin_panel")])
@@ -1915,6 +1929,7 @@ async def handle_message(update: Update, context: CallbackContext):
         TOOLS_DECADE_GOAL,
         TOOLS_RESET,
         TOOLS_ADMIN,
+        TOOLS_TOGGLE_IMAGES,
         TOOLS_BACK,
     }:
         db_user = DatabaseManager.get_user(user.id)
@@ -1946,6 +1961,9 @@ async def handle_message(update: Update, context: CallbackContext):
             return
         if text == TOOLS_RESET:
             await update.message.reply_text("Подтверди сброс:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ Сброс всех данных", callback_data="reset_data")]]))
+            return
+        if text == TOOLS_TOGGLE_IMAGES:
+            await toggle_images_mode_message(update, context)
             return
         if text == TOOLS_ADMIN and is_admin_telegram(user.id):
             await send_admin_panel_for_message(update)
@@ -2060,10 +2078,12 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "reset_data_yes": reset_data_confirm_yes,
         "reset_data_no": reset_data_confirm_no,
         "toggle_price": toggle_price_mode,
+        "toggle_images_mode": toggle_images_mode,
         "combo_settings": combo_settings_menu,
         "combo_create_settings": combo_builder_start,
         "admin_panel": admin_panel,
         "admin_users": admin_users,
+        "admin_banned_users": admin_banned_users,
         "admin_subscriptions": admin_subscriptions,
         "admin_broadcast_menu": admin_broadcast_menu,
         "admin_broadcast_all": lambda q, c: admin_broadcast_prepare(q, c, "all"),
@@ -2198,6 +2218,7 @@ async def handle_callback(update: Update, context: CallbackContext):
         ("admin_activate_days_prompt_", admin_activate_days_prompt),
         ("admin_disable_subscription_", admin_disable_subscription),
         ("admin_broadcast_user_", lambda q, c, d: admin_broadcast_prepare(q, c, d.replace("admin_broadcast_user_", ""))),
+        ("admin_unban_", admin_unban_user),
         ("calendar_nav_", calendar_nav_callback),
         ("calendar_day_", calendar_day_callback),
         ("calendar_set_", calendar_set_day_type_callback),
@@ -2328,7 +2349,7 @@ async def current_shift(query, context):
             image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id']))
         except Exception:
             logger.exception("dashboard closed image render failed")
-        if image is not None:
+        if image is not None and is_images_mode_enabled(db_user):
             await context.bot.send_photo(
                 chat_id=query.message.chat_id,
                 photo=image,
@@ -2352,7 +2373,7 @@ async def current_shift(query, context):
         image = build_dashboard_image_bytes_open(_build_open_dashboard_payload(db_user['id'], active_shift, cars, total))
     except Exception:
         logger.exception("dashboard open image render failed")
-    if image is not None:
+    if image is not None and is_images_mode_enabled(db_user):
         await context.bot.send_photo(chat_id=query.message.chat_id, photo=image, filename="dashboard.png", caption="📊 Дашборд")
         await query.edit_message_text("✅ Дашборд сформирован")
     else:
@@ -2455,6 +2476,7 @@ async def admin_panel(query, context):
         return
     keyboard = [
         [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton("🚫 Забаненные", callback_data="admin_banned_users")],
         [InlineKeyboardButton("💳 Подписки", callback_data="admin_subscriptions")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast_menu")],
         [InlineKeyboardButton("❓ Редактировать FAQ", callback_data="admin_faq_menu")],
@@ -2469,6 +2491,7 @@ async def admin_panel(query, context):
 async def send_admin_panel_for_message(update: Update):
     keyboard = [
         [InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton("🚫 Забаненные", callback_data="admin_banned_users")],
         [InlineKeyboardButton("💳 Подписки", callback_data="admin_subscriptions")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast_menu")],
         [InlineKeyboardButton("❓ Редактировать FAQ", callback_data="admin_faq_menu")],
@@ -2488,6 +2511,34 @@ async def admin_users(query, context):
         keyboard.append([InlineKeyboardButton(f"{status} {row['name']} ({row['telegram_id']})", callback_data=f"admin_user_{row['id']}")])
     keyboard.append([InlineKeyboardButton("🔙 В админку", callback_data="admin_panel")])
     await query.edit_message_text("👥 Пользователи:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def admin_banned_users(query, context):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    users = DatabaseManager.get_banned_users()
+    keyboard = []
+    for row in users[:40]:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"⛔ {row['name']} ({row['telegram_id']})",
+                callback_data=f"admin_unban_{row['telegram_id']}"
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 В админку", callback_data="admin_panel")])
+    text = "🚫 Забаненные пользователи\nНажмите на пользователя, чтобы разбанить."
+    if not users:
+        text = "🚫 Список забаненных пуст."
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def admin_unban_user(query, context, data):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    telegram_id = int(data.replace("admin_unban_", ""))
+    DatabaseManager.unban_telegram_user(telegram_id)
+    await query.answer("✅ Пользователь разбанен")
+    await admin_banned_users(query, context)
 
 
 async def admin_subscriptions(query, context):
@@ -2539,7 +2590,7 @@ async def admin_user_card(query, context, data):
     )
     back_callback = context.user_data.get("admin_user_back", "admin_users")
     keyboard = [
-        [InlineKeyboardButton("🔓 Открыть доступ" if blocked else "⛔ Закрыть доступ", callback_data=f"admin_toggle_block_{user_id}")],
+        [InlineKeyboardButton("🔓 Открыть доступ" if blocked else "⛔ Полный бан (удалить профиль)", callback_data=f"admin_toggle_block_{user_id}")],
         [InlineKeyboardButton(
             "🏆 Учитывать в лидерборде: ДА" if include_in_leaderboard else "🏆 Учитывать в лидерборде: НЕТ",
             callback_data=f"admin_toggle_leaderboard_{user_id}",
@@ -2573,9 +2624,23 @@ async def admin_toggle_block(query, context, data):
     if not row:
         await query.answer("Пользователь не найден")
         return
-    new_state = not bool(int(row.get("is_blocked", 0)))
-    DatabaseManager.set_user_blocked(user_id, new_state)
-    await admin_user_card(query, context, f"admin_user_{user_id}")
+    blocked = bool(int(row.get("is_blocked", 0)))
+    if blocked:
+        DatabaseManager.set_user_blocked(user_id, False)
+        await admin_user_card(query, context, f"admin_user_{user_id}")
+        return
+
+    telegram_id = int(row.get("telegram_id") or 0)
+    DatabaseManager.ban_and_delete_user(user_id, reason=f"admin:{query.from_user.id}")
+    await query.edit_message_text(
+        f"⛔ Профиль {row.get('name', 'пользователь')} полностью удалён и отправлен в бан-лист.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚫 Открыть список забаненных", callback_data="admin_banned_users")]])
+    )
+    try:
+        if telegram_id:
+            await context.bot.send_message(chat_id=telegram_id, text="⛔ Ваш профиль удалён и заблокирован администратором.")
+    except Exception:
+        pass
 
 
 async def admin_toggle_leaderboard(query, context, data):
@@ -4273,7 +4338,7 @@ async def close_shift_confirm_yes(query, context, data):
         image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id'], closed_shift, cars, total))
     except Exception:
         logger.exception("dashboard closed image render failed")
-    if image is not None:
+    if image is not None and is_images_mode_enabled(db_user):
         await context.bot.send_photo(chat_id=query.message.chat_id, photo=image, filename="dashboard.png", caption="📊 Дашборд")
         await query.edit_message_text("✅ Смена закрыта. Дашборд отправлен.")
     else:
@@ -4374,15 +4439,16 @@ async def calendar_rebase_callback(query, context):
 
 
 def build_leaderboard_text(decade_title: str, decade_leaders: list[dict]) -> str:
-    header = ["🏆 Топ героев", f"📆 Декада: {decade_title}"]
+    header = ["🏆 Топ героев", f"📆 Период: {decade_title}"]
     if not decade_leaders:
-        return "\n".join(header + ["Пока нет данных за декаду"])
+        return "\n".join(header + ["", "Пока нет данных за этот период. Добавляйте машины — рейтинг появится автоматически."])
     lines = []
     for place, leader in enumerate(decade_leaders, start=1):
         total = format_money(int(leader.get("total_amount", 0)))
         shifts = int(leader.get("shifts_count", leader.get("shift_count", 0)) or 0)
-        lines.append(f"{place}. {leader.get('name', '—')} — {total} ({shifts} смен)")
-    return "\n".join(header + [""] + lines)
+        avg_hour = int(leader.get("avg_per_hour") or 0)
+        lines.append(f"{place}. {leader.get('name', '—')} — {total} • {shifts} смен • {format_money(avg_hour)}/ч")
+    return "\n".join(header + ["", "Кто впереди — тот забирает декаду 👇", ""] + lines)
 
 
 def _load_rank_font(image_font, size: int):
@@ -4854,8 +4920,12 @@ def _build_leaderboard_image_fallback(decade_title: str, decade_leaders: list[di
     return out
 
 
-async def send_leaderboard_output(chat_target, context: CallbackContext, decade_title: str, decade_leaders: list[dict], reply_markup=None, highlight_name: str | None = None):
+async def send_leaderboard_output(chat_target, context: CallbackContext, decade_title: str, decade_leaders: list[dict], reply_markup=None, highlight_name: str | None = None, requester_telegram_id: int | None = None):
     text_message = build_leaderboard_text(decade_title, decade_leaders)
+    if requester_telegram_id is None and getattr(chat_target, "from_user", None):
+        requester_telegram_id = int(chat_target.from_user.id)
+    db_user = DatabaseManager.get_user(requester_telegram_id) if requester_telegram_id else None
+    images_enabled = is_images_mode_enabled(db_user)
     # live statuses
     class _U:
         callback_query = None
@@ -4880,15 +4950,17 @@ async def send_leaderboard_output(chat_target, context: CallbackContext, decade_
     except Exception:
         await edit_status(st, "⚠️ Не смог получить часть данных, показал то, что есть.")
 
-    await edit_status(st, STATUS_LEADERBOARD[2])
-    try:
-        image = build_leaderboard_image_bytes(decade_title, decade_leaders, highlight_name, top3_avatars=top3_avatars)
-    except Exception:
-        logger.exception("leaderboard image render failed")
-        image = None
+    image = None
+    if images_enabled:
+        await edit_status(st, STATUS_LEADERBOARD[2])
+        try:
+            image = build_leaderboard_image_bytes(decade_title, decade_leaders, highlight_name, top3_avatars=top3_avatars)
+        except Exception:
+            logger.exception("leaderboard image render failed")
+            image = None
 
-    if image is None:
-        image = _build_leaderboard_image_fallback(decade_title, decade_leaders)
+        if image is None:
+            image = _build_leaderboard_image_fallback(decade_title, decade_leaders)
 
     if image is not None:
         await done_status(
@@ -4938,6 +5010,7 @@ async def leaderboard(query, context):
         decade_leaders,
         reply_markup=create_main_reply_keyboard(has_active),
         highlight_name=highlight_name,
+        requester_telegram_id=query.from_user.id,
     )
 
 
@@ -5072,7 +5145,7 @@ async def current_shift_message(update: Update, context: CallbackContext):
             image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id']))
         except Exception:
             logger.exception("dashboard closed image render failed")
-        if image is not None:
+        if image is not None and is_images_mode_enabled(db_user):
             await update.message.reply_photo(photo=image, filename="dashboard.png", caption="📊 Дашборд")
         else:
             await update.message.reply_text(
@@ -5092,7 +5165,7 @@ async def current_shift_message(update: Update, context: CallbackContext):
         image = build_dashboard_image_bytes_open(_build_open_dashboard_payload(db_user['id'], active_shift, cars, total))
     except Exception:
         logger.exception("dashboard open image render failed")
-    if image is not None:
+    if image is not None and is_images_mode_enabled(db_user):
         await update.message.reply_photo(photo=image, filename="dashboard.png", caption="📊 Дашборд")
     else:
         await update.message.reply_text(
@@ -5149,6 +5222,7 @@ async def leaderboard_message(update: Update, context: CallbackContext):
         decade_leaders,
         reply_markup=create_main_reply_keyboard(has_active),
         highlight_name=highlight_name,
+        requester_telegram_id=update.effective_user.id,
     )
 
 
@@ -5453,6 +5527,34 @@ async def toggle_price_mode(query, context):
         f"✅ Прайс переключен: {label}\n"
         "Откройте машину и добавляйте услуги в этом режиме."
     )
+
+
+def is_images_mode_enabled(db_user: dict | None) -> bool:
+    return bool(db_user and DatabaseManager.is_images_enabled(int(db_user["id"])))
+
+
+async def toggle_images_mode(query, context):
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+
+    current = DatabaseManager.is_images_enabled(db_user["id"])
+    DatabaseManager.set_images_enabled(db_user["id"], not current)
+    state = "выключены" if current else "включены"
+    await query.edit_message_text(f"✅ Режим обновлён: картинки {state}.")
+
+
+async def toggle_images_mode_message(update: Update, context: CallbackContext):
+    db_user = DatabaseManager.get_user(update.effective_user.id)
+    if not db_user:
+        await update.message.reply_text("❌ Пользователь не найден")
+        return
+
+    current = DatabaseManager.is_images_enabled(db_user["id"])
+    DatabaseManager.set_images_enabled(db_user["id"], not current)
+    state = "выключены" if current else "включены"
+    await update.message.reply_text(f"✅ Режим обновлён: картинки {state}.")
 
 
 async def cleanup_data_menu(query, context):

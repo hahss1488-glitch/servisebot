@@ -82,6 +82,14 @@ def init_database():
         value TEXT DEFAULT ''
     )""")
 
+    cur.execute("""CREATE TABLE IF NOT EXISTS banned_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id BIGINT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reason TEXT DEFAULT ''
+    )""")
+
     cur.execute("""CREATE TABLE IF NOT EXISTS user_calendar_overrides (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -154,6 +162,8 @@ def init_database():
     settings_columns = {row[1] for row in cur.fetchall()}
     if "broadcast_enabled" not in settings_columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN broadcast_enabled INTEGER DEFAULT 1")
+    if "images_enabled" not in settings_columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN images_enabled INTEGER DEFAULT 1")
     
     conn.commit()
     conn.close()
@@ -232,6 +242,80 @@ class DatabaseManager:
         rows = cur.fetchall()
         conn.close()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def is_telegram_banned(telegram_id: int) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM banned_users WHERE telegram_id = ?", (telegram_id,))
+        row = cur.fetchone()
+        conn.close()
+        return bool(row)
+
+    @staticmethod
+    def get_banned_users() -> List[Dict]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT telegram_id, name, banned_at, reason
+            FROM banned_users
+            ORDER BY banned_at DESC"""
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def unban_telegram_user(telegram_id: int) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM banned_users WHERE telegram_id = ?", (telegram_id,))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def ban_and_delete_user(user_id: int, reason: str = "") -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT telegram_id, name FROM users WHERE id = ?", (user_id,))
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            return
+
+        telegram_id = int(row["telegram_id"])
+        name = str(row["name"] or "Пользователь")
+
+        cur.execute(
+            """INSERT INTO banned_users (telegram_id, name, reason)
+            VALUES (?, ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                name = excluded.name,
+                reason = excluded.reason,
+                banned_at = CURRENT_TIMESTAMP""",
+            (telegram_id, name, reason),
+        )
+
+        cur.execute(
+            """DELETE FROM car_services
+            WHERE car_id IN (
+                SELECT c.id
+                FROM cars c
+                JOIN shifts s ON s.id = c.shift_id
+                WHERE s.user_id = ?
+            )""",
+            (user_id,),
+        )
+        cur.execute("DELETE FROM cars WHERE shift_id IN (SELECT id FROM shifts WHERE user_id = ?)", (user_id,))
+        cur.execute("DELETE FROM shifts WHERE user_id = ?", (user_id,))
+        cur.execute("DELETE FROM user_calendar_overrides WHERE user_id = ?", (user_id,))
+        cur.execute("DELETE FROM user_combos WHERE user_id = ?", (user_id,))
+        cur.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+        cur.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+        conn.commit()
+        conn.close()
 
     # ========== СМЕНЫ ==========
     @staticmethod
@@ -775,6 +859,28 @@ class DatabaseManager:
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET broadcast_enabled = excluded.broadcast_enabled""",
             (user_id, 1 if include else 0)
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def is_images_enabled(user_id: int) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT images_enabled FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        return not row or int(row["images_enabled"] or 1) == 1
+
+    @staticmethod
+    def set_images_enabled(user_id: int, enabled: bool) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            f"""INSERT INTO user_settings (user_id, images_enabled)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET images_enabled = excluded.images_enabled""",
+            (user_id, 1 if enabled else 0)
         )
         conn.commit()
         conn.close()
