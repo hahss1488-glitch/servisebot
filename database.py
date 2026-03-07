@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 DB_PATH = "service_bot.db"
 DB_TIMEZONE = "Europe/Moscow"
 LOCAL_TZ = ZoneInfo(DB_TIMEZONE)
+SHIFT_WORK_DAY_EXPR = "COALESCE(NULLIF(s.work_date, ''), date(s.start_time, '+3 hours'))"
 
 
 def now_local() -> datetime:
@@ -38,6 +39,7 @@ def init_database():
         end_time TIMESTAMP,
         status TEXT DEFAULT 'active',
         shift_target INTEGER DEFAULT 0,
+        work_date TEXT DEFAULT '',
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
     
@@ -135,6 +137,23 @@ def init_database():
         cur.execute("ALTER TABLE shifts ADD COLUMN pause_started_at TEXT DEFAULT ''")
     if "paused_seconds" not in shift_columns:
         cur.execute("ALTER TABLE shifts ADD COLUMN paused_seconds INTEGER DEFAULT 0")
+    if "work_date" not in shift_columns:
+        cur.execute("ALTER TABLE shifts ADD COLUMN work_date TEXT DEFAULT ''")
+    cur.execute(
+        """UPDATE shifts
+        SET work_date = date(start_time, '+3 hours')
+        WHERE COALESCE(work_date, '') = ''"""
+    )
+    cur.execute(
+        """UPDATE shifts
+        SET work_date = date(start_time, '+3 hours')
+        WHERE date(work_date) <> date(start_time, '+3 hours')"""
+    )
+
+    cur.execute("PRAGMA table_info(user_settings)")
+    settings_columns = {row[1] for row in cur.fetchall()}
+    if "broadcast_enabled" not in settings_columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN broadcast_enabled INTEGER DEFAULT 1")
     
     conn.commit()
     conn.close()
@@ -184,7 +203,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, is_blocked)
+            f"""INSERT INTO user_settings (user_id, is_blocked)
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET is_blocked = excluded.is_blocked""",
             (user_id, 1 if blocked else 0)
@@ -197,9 +216,10 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT u.id, u.telegram_id, u.name, u.created_at,
+            f"""SELECT u.id, u.telegram_id, u.name, u.created_at,
             COALESCE(us.is_blocked, 0) as is_blocked,
             COALESCE(us.include_in_leaderboard, 1) as include_in_leaderboard,
+            COALESCE(us.broadcast_enabled, 1) as broadcast_enabled,
             COALESCE(COUNT(DISTINCT s.id), 0) as shifts_count,
             COALESCE(SUM(c.total_amount), 0) as total_amount
             FROM users u
@@ -219,8 +239,8 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO shifts (user_id, start_time) VALUES (?, ?)",
-            (user_id, now_local())
+            "INSERT INTO shifts (user_id, start_time, work_date) VALUES (?, ?, ?)",
+            (user_id, now_local(), now_local().date().isoformat())
         )
         shift_id = cur.lastrowid
         conn.commit()
@@ -276,7 +296,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT cs.service_name,
+            f"""SELECT cs.service_name,
             SUM(cs.quantity) as total_count,
             SUM(cs.price * cs.quantity) as total_amount
             FROM cars c
@@ -296,7 +316,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT s.*, COALESCE(SUM(c.total_amount), 0) as total_amount
+            f"""SELECT s.*, COALESCE(SUM(c.total_amount), 0) as total_amount
             FROM shifts s
             LEFT JOIN cars c ON s.id = c.shift_id
             WHERE s.user_id = ?
@@ -431,7 +451,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, daily_goal)
+            f"""INSERT INTO user_settings (user_id, daily_goal)
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET daily_goal = excluded.daily_goal""",
             (user_id, goal)
@@ -444,7 +464,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, shift_goal)
+            f"""INSERT INTO user_settings (user_id, shift_goal)
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET shift_goal = excluded.shift_goal""",
             (user_id, int(goal or 0))
@@ -469,7 +489,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, decade_goal)
+            f"""INSERT INTO user_settings (user_id, decade_goal)
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET decade_goal = excluded.decade_goal""",
             (user_id, goal)
@@ -495,7 +515,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, price_mode, price_mode_lock_until)
+            f"""INSERT INTO user_settings (user_id, price_mode, price_mode_lock_until)
             VALUES (?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 price_mode = excluded.price_mode,
@@ -519,7 +539,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, last_decade_notified)
+            f"""INSERT INTO user_settings (user_id, last_decade_notified)
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET last_decade_notified = excluded.last_decade_notified""",
             (user_id, decade_key)
@@ -532,10 +552,10 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT COALESCE(SUM(c.total_amount), 0)
+            f"""SELECT COALESCE(SUM(c.total_amount), 0)
             FROM cars c
             JOIN shifts s ON s.id = c.shift_id
-            WHERE s.user_id = ? AND date(c.created_at, '+3 hours') = date(?)""",
+            WHERE s.user_id = ? AND {SHIFT_WORK_DAY_EXPR} = date(?)""",
             (user_id, date_str)
         )
         row = cur.fetchone()
@@ -547,10 +567,10 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT COUNT(c.id)
+            f"""SELECT COUNT(c.id)
             FROM cars c
             JOIN shifts s ON s.id = c.shift_id
-            WHERE s.user_id = ? AND date(c.created_at, '+3 hours') = date(?)""",
+            WHERE s.user_id = ? AND {SHIFT_WORK_DAY_EXPR} = date(?)""",
             (user_id, date_str)
         )
         row = cur.fetchone()
@@ -562,7 +582,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT u.name, u.telegram_id,
+            f"""SELECT u.name, u.telegram_id,
             COUNT(DISTINCT s.id) as shift_count,
             COALESCE(SUM(c.total_amount), 0) as total_amount
             FROM users u
@@ -595,7 +615,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT u.name, u.telegram_id,
+            f"""SELECT u.name, u.telegram_id,
             COUNT(DISTINCT s.id) as shift_count,
             COALESCE(SUM(c.total_amount), 0) as total_amount
             FROM users u
@@ -604,7 +624,7 @@ class DatabaseManager:
             LEFT JOIN user_settings us ON us.user_id = u.id
             WHERE COALESCE(us.is_blocked, 0) = 0
               AND COALESCE(us.include_in_leaderboard, 1) = 1
-              AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)
+              AND {SHIFT_WORK_DAY_EXPR} BETWEEN date(?) AND date(?)
             GROUP BY u.id
             ORDER BY total_amount DESC
             LIMIT ?""",
@@ -633,7 +653,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT u.id as user_id, u.name, u.telegram_id,
+            f"""SELECT u.id as user_id, u.name, u.telegram_id,
             COALESCE(SUM(c.total_amount), 0) as total_amount,
             COUNT(DISTINCT s.id) as shift_count,
             COALESCE(us.decade_goal, 0) as decade_goal
@@ -643,7 +663,7 @@ class DatabaseManager:
             LEFT JOIN user_settings us ON us.user_id = u.id
             WHERE COALESCE(us.is_blocked, 0) = 0
               AND COALESCE(us.include_in_leaderboard, 1) = 1
-              AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)
+              AND {SHIFT_WORK_DAY_EXPR} BETWEEN date(?) AND date(?)
             GROUP BY u.id
             ORDER BY total_amount DESC
             LIMIT ?""",
@@ -658,12 +678,12 @@ class DatabaseManager:
         placeholders = ",".join("?" for _ in user_ids)
         cur.execute(
             f"""SELECT s.user_id as user_id,
-            CAST(strftime('%d', date(c.created_at, '+3 hours')) AS INTEGER) as day,
+            CAST(strftime('%d', {SHIFT_WORK_DAY_EXPR}) AS INTEGER) as day,
             COALESCE(SUM(c.total_amount), 0) as total_amount
             FROM cars c
             JOIN shifts s ON s.id = c.shift_id
             WHERE s.user_id IN ({placeholders})
-              AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)
+              AND {SHIFT_WORK_DAY_EXPR} BETWEEN date(?) AND date(?)
             GROUP BY s.user_id, day""",
             [*user_ids, start_date, end_date]
         )
@@ -678,7 +698,7 @@ class DatabaseManager:
               AND EXISTS (
                 SELECT 1 FROM cars c
                 WHERE c.shift_id = s.id
-                  AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)
+                  AND {SHIFT_WORK_DAY_EXPR} BETWEEN date(?) AND date(?)
               )
             GROUP BY s.user_id""",
             [now_str, now_str, *user_ids, start_date, end_date]
@@ -729,9 +749,31 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, include_in_leaderboard)
+            f"""INSERT INTO user_settings (user_id, include_in_leaderboard)
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET include_in_leaderboard = excluded.include_in_leaderboard""",
+            (user_id, 1 if include else 0)
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def is_user_in_broadcast(user_id: int) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT broadcast_enabled FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        return not row or int(row["broadcast_enabled"] or 1) == 1
+
+    @staticmethod
+    def set_user_in_broadcast(user_id: int, include: bool) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            f"""INSERT INTO user_settings (user_id, broadcast_enabled)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET broadcast_enabled = excluded.broadcast_enabled""",
             (user_id, 1 if include else 0)
         )
         conn.commit()
@@ -742,10 +784,10 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT COALESCE(SUM(c.total_amount), 0)
+            f"""SELECT COALESCE(SUM(c.total_amount), 0)
             FROM shifts s
             LEFT JOIN cars c ON s.id = c.shift_id
-            WHERE s.user_id = ? AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)""",
+            WHERE s.user_id = ? AND {SHIFT_WORK_DAY_EXPR} BETWEEN date(?) AND date(?)""",
             (user_id, start_date, end_date)
         )
         row = cur.fetchone()
@@ -757,7 +799,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT cs.service_name,
+            f"""SELECT cs.service_name,
             SUM(cs.quantity) as total_count,
             SUM(cs.price * cs.quantity) as total_amount
             FROM shifts s
@@ -778,7 +820,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT c.car_number,
+            f"""SELECT c.car_number,
             COUNT(c.id) as visits,
             SUM(c.total_amount) as total_amount
             FROM shifts s
@@ -798,7 +840,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT s.id as shift_id,
+            f"""SELECT s.id as shift_id,
             s.start_time,
             s.end_time,
             c.car_number,
@@ -844,7 +886,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT c.*
+            f"""SELECT c.*
             FROM cars c
             WHERE c.shift_id = ?
               AND c.id < ?
@@ -886,7 +928,7 @@ class DatabaseManager:
         
         # Проверяем, есть ли уже такая услуга
         cur.execute(
-            """SELECT id, quantity FROM car_services 
+            f"""SELECT id, quantity FROM car_services 
             WHERE car_id = ? AND service_id = ? AND price = ?""",
             (car_id, service_id, price)
         )
@@ -909,7 +951,7 @@ class DatabaseManager:
         
         # Обновляем общую сумму машины
         cur.execute(
-            """UPDATE cars 
+            f"""UPDATE cars 
             SET total_amount = (
                 SELECT COALESCE(SUM(price * quantity), 0) 
                 FROM car_services 
@@ -927,7 +969,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT id, quantity FROM car_services
+            f"""SELECT id, quantity FROM car_services
             WHERE car_id = ? AND service_id = ?
             ORDER BY created_at DESC
             LIMIT 1""",
@@ -948,7 +990,7 @@ class DatabaseManager:
             cur.execute("DELETE FROM car_services WHERE id = ?", (existing["id"],))
 
         cur.execute(
-            """UPDATE cars
+            f"""UPDATE cars
             SET total_amount = (
                 SELECT COALESCE(SUM(price * quantity), 0)
                 FROM car_services
@@ -975,7 +1017,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT date(s.start_time) as day,
+            f"""SELECT date(s.start_time) as day,
             COUNT(c.id) as cars_count,
             COALESCE(SUM(c.total_amount), 0) as total_amount
             FROM shifts s
@@ -996,10 +1038,10 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT c.id, c.car_number, c.total_amount, c.shift_id, c.created_at
+            f"""SELECT c.id, c.car_number, c.total_amount, c.shift_id, c.created_at
             FROM cars c
             JOIN shifts s ON s.id = c.shift_id
-            WHERE s.user_id = ? AND date(c.created_at, '+3 hours') = date(?)
+            WHERE s.user_id = ? AND {SHIFT_WORK_DAY_EXPR} = date(?)
             ORDER BY c.created_at""",
             (user_id, day)
         )
@@ -1012,7 +1054,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT c.id
+            f"""SELECT c.id
             FROM cars c
             JOIN shifts s ON s.id = c.shift_id
             WHERE c.id = ? AND s.user_id = ?""",
@@ -1033,10 +1075,10 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT c.id
+            f"""SELECT c.id
             FROM cars c
             JOIN shifts s ON s.id = c.shift_id
-            WHERE s.user_id = ? AND date(c.created_at, '+3 hours') = date(?)""",
+            WHERE s.user_id = ? AND {SHIFT_WORK_DAY_EXPR} = date(?)""",
             (user_id, day)
         )
         car_ids = [row[0] for row in cur.fetchall()]
@@ -1052,12 +1094,12 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT
-            CAST(strftime('%Y', date(c.created_at, '+3 hours')) AS INTEGER) as year,
-            CAST(strftime('%m', date(c.created_at, '+3 hours')) AS INTEGER) as month,
+            f"""SELECT
+            CAST(strftime('%Y', {SHIFT_WORK_DAY_EXPR}) AS INTEGER) as year,
+            CAST(strftime('%m', {SHIFT_WORK_DAY_EXPR}) AS INTEGER) as month,
             CASE
-                WHEN CAST(strftime('%d', date(c.created_at, '+3 hours')) AS INTEGER) <= 10 THEN 1
-                WHEN CAST(strftime('%d', date(c.created_at, '+3 hours')) AS INTEGER) <= 20 THEN 2
+                WHEN CAST(strftime('%d', {SHIFT_WORK_DAY_EXPR}) AS INTEGER) <= 10 THEN 1
+                WHEN CAST(strftime('%d', {SHIFT_WORK_DAY_EXPR}) AS INTEGER) <= 20 THEN 2
                 ELSE 3
             END as decade_index,
             COUNT(c.id) as cars_count,
@@ -1092,13 +1134,13 @@ class DatabaseManager:
         end_date = f"{year:04d}-{month:02d}-{end_day:02d}"
 
         cur.execute(
-            """SELECT date(c.created_at, '+3 hours') as day,
+            f"""SELECT {SHIFT_WORK_DAY_EXPR} as day,
             COUNT(c.id) as cars_count,
             COALESCE(SUM(c.total_amount), 0) as total_amount
             FROM shifts s
             JOIN cars c ON c.shift_id = s.id
             WHERE s.user_id = ?
-              AND date(c.created_at, '+3 hours') BETWEEN date(?) AND date(?)
+              AND {SHIFT_WORK_DAY_EXPR} BETWEEN date(?) AND date(?)
             GROUP BY day
             ORDER BY day""",
             (user_id, start_date, end_date)
@@ -1112,9 +1154,9 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT DISTINCT strftime('%Y-%m', start_time) as ym
-            FROM shifts
-            WHERE user_id = ?
+            f"""SELECT DISTINCT strftime('%Y-%m', {SHIFT_WORK_DAY_EXPR}) as ym
+            FROM shifts s
+            WHERE s.user_id = ?
             ORDER BY ym DESC
             LIMIT ?""",
             (user_id, limit)
@@ -1129,7 +1171,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT s.id
+            f"""SELECT s.id
             FROM shifts s
             LEFT JOIN cars c ON c.shift_id = s.id
             WHERE s.user_id = ?
@@ -1163,7 +1205,7 @@ class DatabaseManager:
         cur.execute("DELETE FROM shifts WHERE user_id = ?", (user_id,))
         cur.execute("DELETE FROM user_combos WHERE user_id = ?", (user_id,))
         cur.execute(
-            """INSERT INTO user_settings (user_id, daily_goal, shift_goal, decade_goal, price_mode, last_decade_notified)
+            f"""INSERT INTO user_settings (user_id, daily_goal, shift_goal, decade_goal, price_mode, last_decade_notified)
             VALUES (?, 0, 0, 0, 'day', '')
             ON CONFLICT(user_id) DO UPDATE SET
                 daily_goal = 0,
@@ -1183,7 +1225,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT cs.service_id, COALESCE(SUM(cs.quantity), 0) AS qty
+            f"""SELECT cs.service_id, COALESCE(SUM(cs.quantity), 0) AS qty
             FROM car_services cs
             JOIN cars c ON c.id = cs.car_id
             JOIN shifts s ON s.id = c.shift_id
@@ -1202,13 +1244,13 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT cs.service_name,
+            f"""SELECT cs.service_name,
             SUM(cs.quantity) as total_count,
             SUM(cs.price * cs.quantity) as total_amount
             FROM shifts s
             JOIN cars c ON c.shift_id = s.id
             JOIN car_services cs ON cs.car_id = c.id
-            WHERE s.user_id = ? AND date(s.start_time) BETWEEN date(?) AND date(?)
+            WHERE s.user_id = ? AND {SHIFT_WORK_DAY_EXPR} BETWEEN date(?) AND date(?)
             GROUP BY cs.service_name
             ORDER BY total_amount DESC
             LIMIT ?""",
@@ -1223,12 +1265,12 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT c.car_number,
+            f"""SELECT c.car_number,
             COUNT(c.id) as visits,
             SUM(c.total_amount) as total_amount
             FROM shifts s
             JOIN cars c ON c.shift_id = s.id
-            WHERE s.user_id = ? AND date(s.start_time) BETWEEN date(?) AND date(?)
+            WHERE s.user_id = ? AND {SHIFT_WORK_DAY_EXPR} BETWEEN date(?) AND date(?)
             GROUP BY c.car_number
             ORDER BY total_amount DESC
             LIMIT ?""",
@@ -1348,7 +1390,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, subscription_expires_at)
+            f"""INSERT INTO user_settings (user_id, subscription_expires_at)
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET subscription_expires_at = excluded.subscription_expires_at""",
             (user_id, expires_at or "")
@@ -1370,7 +1412,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, work_anchor_date)
+            f"""INSERT INTO user_settings (user_id, work_anchor_date)
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET work_anchor_date = excluded.work_anchor_date""",
             (user_id, anchor_date or "")
@@ -1417,7 +1459,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, goal_enabled)
+            f"""INSERT INTO user_settings (user_id, goal_enabled)
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET goal_enabled = excluded.goal_enabled""",
             (user_id, 1 if enabled else 0)
@@ -1441,7 +1483,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, goal_chat_id, goal_message_id)
+            f"""INSERT INTO user_settings (user_id, goal_chat_id, goal_message_id)
             VALUES (?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET goal_chat_id = excluded.goal_chat_id, goal_message_id = excluded.goal_message_id""",
             (user_id, int(chat_id), int(message_id))
@@ -1454,7 +1496,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO user_settings (user_id, goal_chat_id, goal_message_id)
+            f"""INSERT INTO user_settings (user_id, goal_chat_id, goal_message_id)
             VALUES (?, 0, 0)
             ON CONFLICT(user_id) DO UPDATE SET goal_chat_id = 0, goal_message_id = 0""",
             (user_id,)
@@ -1476,9 +1518,9 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT COUNT(s.id)
+            f"""SELECT COUNT(s.id)
             FROM shifts s
-            WHERE s.user_id = ? AND date(s.start_time) BETWEEN date(?) AND date(?)""",
+            WHERE s.user_id = ? AND {SHIFT_WORK_DAY_EXPR} BETWEEN date(?) AND date(?)""",
             (user_id, start_date, end_date)
         )
         row = cur.fetchone()
@@ -1490,10 +1532,10 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT COUNT(c.id)
+            f"""SELECT COUNT(c.id)
             FROM cars c
             JOIN shifts s ON s.id = c.shift_id
-            WHERE s.user_id = ? AND date(s.start_time) BETWEEN date(?) AND date(?)""",
+            WHERE s.user_id = ? AND {SHIFT_WORK_DAY_EXPR} BETWEEN date(?) AND date(?)""",
             (user_id, start_date, end_date)
         )
         row = cur.fetchone()
@@ -1505,7 +1547,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT c.id as car_id, c.car_number, cs.service_name, SUM(cs.quantity) as total_count
+            f"""SELECT c.id as car_id, c.car_number, cs.service_name, SUM(cs.quantity) as total_count
             FROM cars c JOIN car_services cs ON cs.car_id = c.id
             WHERE c.shift_id = ?
             GROUP BY c.id, c.car_number, cs.service_name
@@ -1522,13 +1564,13 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """SELECT date(c.created_at, '+3 hours') as day,
+            f"""SELECT {SHIFT_WORK_DAY_EXPR} as day,
             COUNT(DISTINCT s.id) as shifts_count,
             COALESCE(SUM(c.total_amount),0) as total_amount
             FROM shifts s
             JOIN cars c ON c.shift_id = s.id
-            WHERE s.user_id = ? AND strftime('%Y-%m', date(c.created_at, '+3 hours')) = ?
-            GROUP BY date(c.created_at, '+3 hours')
+            WHERE s.user_id = ? AND strftime('%Y-%m', {SHIFT_WORK_DAY_EXPR}) = ?
+            GROUP BY {SHIFT_WORK_DAY_EXPR}
             ORDER BY day""",
             (user_id, year_month)
         )
@@ -1550,7 +1592,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO app_content (key, value) VALUES (?, ?)
+            f"""INSERT INTO app_content (key, value) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
             (key, value)
         )

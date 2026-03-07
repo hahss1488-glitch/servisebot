@@ -618,7 +618,8 @@ def create_main_reply_keyboard(has_active_shift: bool = False, subscription_acti
     shift_button = MENU_SHIFT_CLOSE if has_active_shift else MENU_SHIFT_OPEN
     if has_active_shift:
         lunch_button = MENU_SHIFT_RESUME if shift_paused else MENU_SHIFT_LUNCH
-        keyboard.append([KeyboardButton(MENU_ADD_CAR), KeyboardButton(lunch_button), KeyboardButton(shift_button)])
+        keyboard.append([KeyboardButton(lunch_button)])
+        keyboard.append([KeyboardButton(MENU_ADD_CAR), KeyboardButton(shift_button)])
     else:
         keyboard.append([KeyboardButton(MENU_ADD_CAR), KeyboardButton(shift_button)])
     keyboard.append([KeyboardButton(MENU_CURRENT_SHIFT), KeyboardButton(MENU_LEADERBOARD)])
@@ -1077,7 +1078,7 @@ def _build_open_dashboard_payload(user_id: int, shift: dict, cars: list[dict], t
     }
 
 
-def _build_closed_dashboard_payload(user_id: int) -> dict:
+def _build_closed_dashboard_payload(user_id: int, closed_shift: dict | None = None, closed_cars: list[dict] | None = None, closed_total: int | None = None) -> dict:
     db_user = DatabaseManager.get_user_by_id(user_id)
     p = calculate_current_decade_shift_plan(db_user) if db_user else {}
     today = now_local().date()
@@ -1090,8 +1091,25 @@ def _build_closed_dashboard_payload(user_id: int) -> dict:
     shifts_done = DatabaseManager.get_shifts_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
     cars_done = DatabaseManager.get_cars_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
     avg_check = int(earned / cars_done) if cars_done else 0
+    shift_metrics = None
+    shift_plan_done = None
+    shift_hours = None
+    shift_total = 0
+    if closed_shift:
+        cars_list = closed_cars or DatabaseManager.get_shift_cars(int(closed_shift["id"]))
+        total_value = int(closed_total if closed_total is not None else DatabaseManager.get_shift_total(int(closed_shift["id"])))
+        shift_total = total_value
+        shift_metrics = build_shift_metrics(closed_shift, cars_list, total_value)
+        target = int(closed_shift.get("shift_target") or 0)
+        shift_plan_done = (total_value >= target) if target > 0 else None
+        shift_hours = shift_metrics["hours"]
+
+    title_value = "Итоги закрытой смены" if closed_shift else "Дашборд"
+    subtitle_value = f"Смена: {shift_metrics['cars_count']} авто • {format_money_glass(shift_total)}" if shift_metrics else f"{title} · {format_decade_range(start_d, end_d)}"
+
     return {
-        "decade_title": f"{title} · {format_decade_range(start_d, end_d)}",
+        "title": title_value,
+        "decade_title": subtitle_value,
         "earned": earned,
         "goal": goal,
         "progress": completion_percent,
@@ -1109,9 +1127,10 @@ def _build_closed_dashboard_payload(user_id: int) -> dict:
         "plan_deviation_label": "Опережение плана" if pace_delta > 0 else ("Отставание от плана" if pace_delta < 0 else "Отклонение от плана"),
         "updated_at": now_local(),
         "mini": [
-            f"Смен: {shifts_done}",
-            f"Машин: {cars_done}",
-            f"Средний чек: {format_money_glass(avg_check)}",
+            (f"Машин: {shift_metrics['cars_count']}" if shift_metrics else f"Смен: {shifts_done}"),
+            (f"Часов: {shift_hours:.1f}" if shift_metrics and shift_hours is not None else f"Машин: {cars_done}"),
+            (f"Доход/час: {format_money_glass(int(shift_metrics['money_per_hour']))}" if shift_metrics else f"Средний чек: {format_money_glass(avg_check)}"),
+            ("План смены выполнен ✅" if shift_plan_done is True else "План смены не выполнен ❌" if shift_plan_done is False else f"{pace_delta:+,}".replace(",", " ") + " ₽ к плану"),
         ],
         "pace_delta_text": f"{pace_delta:+,}".replace(",", " ") + " ₽ к плану" if pace_text != "Старт" else "—",
     }
@@ -2174,6 +2193,7 @@ async def handle_callback(update: Update, context: CallbackContext):
         ("admin_sub_user_", admin_user_card),
         ("admin_toggle_block_", admin_toggle_block),
         ("admin_toggle_leaderboard_", admin_toggle_leaderboard),
+        ("admin_toggle_broadcast_", admin_toggle_broadcast),
         ("admin_activate_month_", admin_activate_month),
         ("admin_activate_days_prompt_", admin_activate_days_prompt),
         ("admin_disable_subscription_", admin_disable_subscription),
@@ -2511,6 +2531,7 @@ async def admin_user_card(query, context, data):
         return
     blocked = bool(int(row.get("is_blocked", 0)))
     include_in_leaderboard = bool(int(row.get("include_in_leaderboard", 1)))
+    include_in_broadcast = bool(int(row.get("broadcast_enabled", 1)))
     target_user = DatabaseManager.get_user_by_id(user_id)
     expires = subscription_expires_at_for_user(target_user) if target_user else None
     sub_status = "♾️ Админ" if is_admin_telegram(int(row["telegram_id"])) else (
@@ -2523,6 +2544,10 @@ async def admin_user_card(query, context, data):
             "🏆 Учитывать в лидерборде: ДА" if include_in_leaderboard else "🏆 Учитывать в лидерборде: НЕТ",
             callback_data=f"admin_toggle_leaderboard_{user_id}",
         )],
+        [InlineKeyboardButton(
+            "📣 Участвует в рассылке: ДА" if include_in_broadcast else "📣 Участвует в рассылке: НЕТ",
+            callback_data=f"admin_toggle_broadcast_{user_id}",
+        )],
         [InlineKeyboardButton("🗓️ Активировать на месяц", callback_data=f"admin_activate_month_{user_id}")],
         [InlineKeyboardButton("✍️ Активировать на N дней", callback_data=f"admin_activate_days_prompt_{user_id}")],
         [InlineKeyboardButton("🚫 Отключить подписку", callback_data=f"admin_disable_subscription_{user_id}")],
@@ -2533,6 +2558,7 @@ async def admin_user_card(query, context, data):
         f"Смен: {row['shifts_count']}\nСумма: {format_money(int(row['total_amount'] or 0))}\n"
         f"Статус: {'Заблокирован' if blocked else 'Активен'}\n"
         f"Лидерборд: {'Учитывается' if include_in_leaderboard else 'Не учитывается'}\n"
+        f"Рассылка: {'Получает' if include_in_broadcast else 'Отключена'}\n"
         f"Подписка: {sub_status}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2563,6 +2589,20 @@ async def admin_toggle_leaderboard(query, context, data):
         return
     new_state = not bool(int(row.get("include_in_leaderboard", 1)))
     DatabaseManager.set_user_in_leaderboard(user_id, new_state)
+    await admin_user_card(query, context, f"admin_user_{user_id}")
+
+
+async def admin_toggle_broadcast(query, context, data):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    user_id = int(data.replace("admin_toggle_broadcast_", ""))
+    users = {u["id"]: u for u in DatabaseManager.get_all_users_with_stats()}
+    row = users.get(user_id)
+    if not row:
+        await query.answer("Пользователь не найден")
+        return
+    new_state = not bool(int(row.get("broadcast_enabled", 1)))
+    DatabaseManager.set_user_in_broadcast(user_id, new_state)
     await admin_user_card(query, context, f"admin_user_{user_id}")
 
 
@@ -2634,6 +2674,8 @@ def get_broadcast_recipients(target: str, admin_db_user: dict) -> list[int]:
         if telegram_id == admin_db_user["telegram_id"]:
             continue
         if int(row.get("is_blocked", 0)) == 1:
+            continue
+        if int(row.get("broadcast_enabled", 1)) == 0:
             continue
 
         user_db = DatabaseManager.get_user_by_id(int(row["id"]))
@@ -4228,7 +4270,7 @@ async def close_shift_confirm_yes(query, context, data):
     message = build_closed_shift_dashboard(closed_shift, cars, total)
     image = None
     try:
-        image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id']))
+        image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id'], closed_shift, cars, total))
     except Exception:
         logger.exception("dashboard closed image render failed")
     if image is not None:

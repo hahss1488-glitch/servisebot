@@ -169,6 +169,7 @@ THEME = {
 }
 
 
+@lru_cache(maxsize=8)
 def background(width: int, height: int):
     """Legacy background for leaderboard renderer."""
     img = Image.new("RGBA", (width, height), _hex(TOKENS["BG_BASE"]))
@@ -419,6 +420,7 @@ def _draw_liquid_panel(
     canvas.alpha_composite(panel, (x1, y1))
 
 
+@lru_cache(maxsize=8)
 def _draw_dashboard_background(width: int, height: int) -> Image.Image:
     img = Image.new("RGBA", (width, height), _hex("#07101D"))
     d = ImageDraw.Draw(img, "RGBA")
@@ -585,7 +587,7 @@ def _render_dashboard_footer_dt(value: Any) -> str:
 
 def render_dashboard_image_bytes(mode: str, payload: dict) -> BytesIO:
     s = SS
-    c = _draw_dashboard_background(W * s, H * s)
+    c = _draw_dashboard_background(W * s, H * s).copy()
     d = ImageDraw.Draw(c, "RGBA")
 
     header = (56 * s, 40 * s, 1544 * s, 152 * s)
@@ -724,7 +726,7 @@ def draw_glass_pill(canvas, bg, box, text, color=TOKENS["TEXT_PRIMARY"], weight=
 
 def render_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None, updated_at: Any | None = None) -> BytesIO:
     s = SS
-    bg = background(W * s, H * s)
+    bg = background(W * s, H * s).copy()
     c = bg.copy()
     d = ImageDraw.Draw(c, "RGBA")
 
