@@ -826,7 +826,9 @@ class DatabaseManager:
         cur.execute("SELECT include_in_leaderboard FROM user_settings WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
         conn.close()
-        return not row or int(row["include_in_leaderboard"] or 1) == 1
+        if not row or row["include_in_leaderboard"] is None:
+            return True
+        return int(row["include_in_leaderboard"]) == 1
 
     @staticmethod
     def set_user_in_leaderboard(user_id: int, include: bool) -> None:
@@ -848,7 +850,9 @@ class DatabaseManager:
         cur.execute("SELECT broadcast_enabled FROM user_settings WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
         conn.close()
-        return not row or int(row["broadcast_enabled"] or 1) == 1
+        if not row or row["broadcast_enabled"] is None:
+            return True
+        return int(row["broadcast_enabled"]) == 1
 
     @staticmethod
     def set_user_in_broadcast(user_id: int, include: bool) -> None:
@@ -870,7 +874,9 @@ class DatabaseManager:
         cur.execute("SELECT images_enabled FROM user_settings WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
         conn.close()
-        return not row or int(row["images_enabled"] or 1) == 1
+        if not row or row["images_enabled"] is None:
+            return True
+        return int(row["images_enabled"]) == 1
 
     @staticmethod
     def set_images_enabled(user_id: int, enabled: bool) -> None:
