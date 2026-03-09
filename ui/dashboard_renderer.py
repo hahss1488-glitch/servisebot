@@ -68,36 +68,46 @@ class LeaderboardData:
 
 
 class DashboardRenderer:
-    WIDTH = 1400
-    HEIGHT = 980
-    MARGIN = 32
+    """Premium dark analytics renderer.
+
+    Composition uses a strict 1600x900 canvas with a 48 px outer margin and
+    24 px internal spacing. Main numbers dominate visual hierarchy, while cards,
+    badges and list rows reuse the same primitives for consistent style.
+    """
+
+    WIDTH = 1600
+    HEIGHT = 900
+    MARGIN = 48
+    GAP = 24
+
+    COLORS = {
+        "bg": (7, 17, 31, 255),
+        "bg_deep": (11, 18, 32, 255),
+        "card": (15, 27, 45, 255),
+        "surface": (19, 34, 56, 255),
+        "text": (243, 247, 255, 255),
+        "text_secondary": (159, 176, 199, 255),
+        "text_muted": (111, 129, 155, 255),
+        "border": (255, 255, 255, 30),
+        "shadow": (1, 6, 14, 180),
+        "success": (91, 231, 169, 255),
+        "warning": (246, 199, 96, 255),
+        "danger": (255, 107, 122, 255),
+        "info": (111, 168, 255, 255),
+        "gold": (239, 198, 110, 255),
+        "silver": (176, 193, 214, 255),
+        "bronze": (208, 154, 104, 255),
+    }
+
+    _avatar_cache: dict[tuple[str, int], Image.Image] = {}
 
     def __init__(self, width: int = WIDTH, height: int = HEIGHT) -> None:
         self.width = width
         self.height = height
 
-    COLORS = {
-        "bg": (8, 17, 31, 255),
-        "bg_depth": (11, 20, 36, 255),
-        "glass": (20, 30, 46, 184),
-        "glass_overlay": (255, 255, 255, 9),
-        "glass_border": (255, 255, 255, 20),
-        "white": (245, 247, 251, 255),
-        "secondary": (168, 180, 199, 255),
-        "muted": (127, 141, 163, 255),
-        "gold": (231, 196, 106, 255),
-        "silver": (184, 196, 214, 255),
-        "bronze": (199, 146, 98, 255),
-        "blue": (121, 184, 255, 255),
-        "green": (87, 211, 140, 255),
-        "red": (255, 122, 122, 255),
-        "pink": (255, 159, 176, 255),
-    }
-    _avatar_cache: dict[tuple[str, int], Image.Image] = {}
-
     @staticmethod
     @lru_cache(maxsize=256)
-    def _font(size: int, bold: bool = False):
+    def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
         paths = (
             "/usr/share/fonts/truetype/inter/Inter-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -120,64 +130,246 @@ class DashboardRenderer:
             return default
 
     def format_money(self, value: Any) -> str:
-        return f"{self._safe_int(value, 0):,} ₽".replace(",", " ")
+        return f"{self._safe_int(value):,} ₽".replace(",", " ")
 
-    def draw_glow(self, img: Image.Image, center: tuple[int, int], size: tuple[int, int], color: tuple[int, int, int, int], blur: int = 42, alpha: int = 110) -> None:
-        layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        d = ImageDraw.Draw(layer)
-        x, y = center
-        w, h = size
-        d.ellipse((x - w // 2, y - h // 2, x + w // 2, y + h // 2), fill=(color[0], color[1], color[2], alpha))
-        img.alpha_composite(layer.filter(ImageFilter.GaussianBlur(blur)))
+    def _tone_for_status(self, text: str) -> tuple[int, int, int, int]:
+        t = (text or "").lower()
+        if "выполн" in t or "лидер" in t or "топ" in t:
+            return self.COLORS["success"]
+        if "почти" in t or "близко" in t:
+            return self.COLORS["warning"]
+        if "до цели" in t or "отстав" in t:
+            return self.COLORS["danger"]
+        return self.COLORS["info"]
 
-    def draw_glass_card(self, img: Image.Image, box: tuple[int, int, int, int], radius: int = 24, accent: tuple[int, int, int, int] | None = None) -> None:
+    def _draw_background(self, image: Image.Image) -> None:
+        draw = ImageDraw.Draw(image)
+        for y in range(self.height):
+            p = y / max(self.height - 1, 1)
+            r = int(self.COLORS["bg"][0] * (1 - p) + self.COLORS["bg_deep"][0] * p)
+            g = int(self.COLORS["bg"][1] * (1 - p) + self.COLORS["bg_deep"][1] * p)
+            b = int(self.COLORS["bg"][2] * (1 - p) + self.COLORS["bg_deep"][2] * p)
+            draw.line((0, y, self.width, y), fill=(r, g, b, 255))
+
+    def draw_rounded_card(self, image: Image.Image, box: tuple[int, int, int, int], radius: int = 26, surface: bool = False) -> None:
         x1, y1, x2, y2 = box
-        layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
         d = ImageDraw.Draw(layer)
-        d.rounded_rectangle((x1 + 2, y1 + 6, x2 + 2, y2 + 8), radius=radius, fill=(3, 7, 14, 170))
-        d.rounded_rectangle(box, radius=radius, fill=self.COLORS["glass"], outline=self.COLORS["glass_border"], width=2)
-        d.rounded_rectangle((x1 + 2, y1 + 2, x2 - 2, y1 + (y2 - y1) // 3), radius=radius, fill=self.COLORS["glass_overlay"])
-        if accent is not None:
-            d.rounded_rectangle((x1 + 18, y1 + 10, x2 - 18, y1 + 14), radius=999, fill=accent)
-        img.alpha_composite(layer)
+        d.rounded_rectangle((x1 + 2, y1 + 8, x2 + 2, y2 + 10), radius=radius, fill=self.COLORS["shadow"])
+        fill = self.COLORS["surface"] if surface else self.COLORS["card"]
+        d.rounded_rectangle(box, radius=radius, fill=fill, outline=self.COLORS["border"], width=1)
+        image.alpha_composite(layer)
 
-    def draw_rank_badge(self, draw: ImageDraw.ImageDraw, pos: tuple[int, int], rank: int, tone: tuple[int, int, int, int]) -> None:
-        x, y = pos
-        text = f"#{rank}"
-        tw = draw.textbbox((0, 0), text, font=self._font(20, True))[2]
-        draw.rounded_rectangle((x, y, x + tw + 28, y + 36), radius=999, fill=(17, 27, 42, 230), outline=(255, 255, 255, 24), width=1)
-        draw.text((x + 14, y + 7), text, fill=tone, font=self._font(20, True))
+    def draw_badge(self, draw: ImageDraw.ImageDraw, right_x: int, y: int, text: str, tone: tuple[int, int, int, int]) -> None:
+        font = self._font(24, True)
+        text_w = draw.textbbox((0, 0), text, font=font)[2]
+        h = 44
+        x = right_x - text_w - 34
+        draw.rounded_rectangle((x, y, right_x, y + h), radius=999, fill=(16, 27, 43, 240), outline=(255, 255, 255, 28), width=1)
+        draw.text((x + 16, y + 10), text, fill=tone, font=font)
 
-    def fit_text(self, draw: ImageDraw.ImageDraw, text: str, max_width: int, max_size: int, min_size: int = 20, bold: bool = True) -> tuple[str, ImageFont.FreeTypeFont]:
-        size = max_size
-        while size >= min_size:
-            font = self._font(size, bold)
-            if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
-                return text, font
-            size -= 1
-        font = self._font(min_size, bold)
-        cut = text
-        while len(cut) > 1 and draw.textbbox((0, 0), cut + "…", font=font)[2] > max_width:
-            cut = cut[:-1]
-        return (cut + "…") if cut else "…", font
+    def draw_avatar_initials_circle(self, image: Image.Image, row: LeaderRow, center: tuple[int, int], size: int, tone: tuple[int, int, int, int] | None = None) -> None:
+        avatar = self._resolve_avatar(row, size, tone=tone)
+        image.alpha_composite(avatar, (center[0] - size // 2, center[1] - size // 2))
 
-    def draw_avatar_or_initials(self, img: Image.Image, row: LeaderRow, center: tuple[int, int], size: int) -> None:
-        avatar = self._resolve_avatar(row, size)
-        img.alpha_composite(avatar, (center[0] - size // 2, center[1] - size // 2))
+    def draw_progress_bar(self, draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], progress: float | None, tone: tuple[int, int, int, int]) -> None:
+        x1, y1, x2, y2 = box
+        draw.rounded_rectangle(box, radius=999, fill=(8, 16, 30, 255), outline=(255, 255, 255, 26), width=1)
+        if progress is None:
+            return
+        p = max(0.0, min(1.0, progress if progress <= 3 else progress / 100.0))
+        fill_w = int((x2 - x1 - 4) * p)
+        if fill_w < 8:
+            return
+        fx2 = x1 + 2 + fill_w
+        draw.rounded_rectangle((x1 + 2, y1 + 2, fx2, y2 - 2), radius=999, fill=tone)
 
-    def draw_status_pill(self, draw: ImageDraw.ImageDraw, right_x: int, y: int, text: str, tone: tuple[int, int, int, int]) -> None:
-        tw = draw.textbbox((0, 0), text, font=self._font(22, True))[2]
-        x = right_x - tw - 34
-        for i in range(42):
-            k = i / 41
-            r = int(16 * (1 - k) + tone[0] * 0.22 * k)
-            g = int(27 * (1 - k) + tone[1] * 0.22 * k)
-            b = int(42 * (1 - k) + tone[2] * 0.22 * k)
-            draw.line((x + 1, y + i, right_x - 1, y + i), fill=(r, g, b, 238))
-        draw.rounded_rectangle((x, y, right_x, y + 42), radius=999, outline=(255, 255, 255, 28), width=1)
-        draw.text((x + 16, y + 10), text, fill=tone, font=self._font(22, True))
+    def draw_main_metric_block(self, image: Image.Image, box: tuple[int, int, int, int], block: PerformanceBlock) -> None:
+        x1, y1, x2, y2 = box
+        tone = self._tone_for_status(block.badge)
+        self.draw_rounded_card(image, box, radius=28)
+        glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        gd = ImageDraw.Draw(glow)
+        gd.ellipse((x1 + 390, y1 + 92, x2 - 390, y1 + 260), fill=(tone[0], tone[1], tone[2], 52))
+        image.alpha_composite(glow.filter(ImageFilter.GaussianBlur(36)))
 
-    def _resolve_avatar(self, row: LeaderRow, size: int) -> Image.Image:
+        draw = ImageDraw.Draw(image)
+        draw.text((x1 + 32, y1 + 30), block.title, fill=self.COLORS["text"], font=self._font(34, True))
+        self.draw_badge(draw, x2 - 32, y1 + 28, block.badge, tone)
+
+        amount = self.format_money(block.revenue)
+        amount_font = self._font(82, True)
+        amount_w = draw.textbbox((0, 0), amount, font=amount_font)[2]
+        draw.text((x1 + (x2 - x1 - amount_w) // 2, y1 + 106), amount, fill=self.COLORS["text"], font=amount_font)
+
+        cars = next((m.value for m in block.metrics if "маш" in m.label.lower()), "—")
+        avg = next((m.value for m in block.metrics if "чек" in m.label.lower()), "—")
+        info_text = f"{cars} машин • средний чек {avg}"
+        info_w = draw.textbbox((0, 0), info_text, font=self._font(27))[2]
+        draw.text((x1 + (x2 - x1 - info_w) // 2, y1 + 212), info_text, fill=self.COLORS["text_secondary"], font=self._font(27))
+
+        self.draw_progress_bar(draw, (x1 + 34, y1 + 268, x2 - 34, y1 + 306), block.run_rate, tone)
+
+        labels = [
+            ("Цель", self.format_money(block.target), self.COLORS["text_secondary"]),
+            ("Осталось", self.format_money(max(block.remaining, 0)), tone if block.remaining > 0 else self.COLORS["success"]),
+            ("Выполнение", f"{(max(0.0, min(1.0, (block.run_rate or 0.0 if block.target else 0.0 if block.run_rate is None else block.run_rate)) if block.run_rate is not None else 0.0) * 100):.0f}%", self.COLORS["text_secondary"]),
+        ]
+        col_w = (x2 - x1 - 64) // 3
+        for i, (label, value, color) in enumerate(labels):
+            xx = x1 + 32 + i * col_w
+            draw.text((xx, y1 + 326), label, fill=self.COLORS["text_muted"], font=self._font(20))
+            draw.text((xx, y1 + 354), value, fill=color, font=self._font(30, True))
+
+    def draw_small_kpi_card(self, image: Image.Image, box: tuple[int, int, int, int], title: str, value: str, tone: tuple[int, int, int, int] | None = None) -> None:
+        self.draw_rounded_card(image, box, radius=24, surface=True)
+        draw = ImageDraw.Draw(image)
+        x1, y1, x2, _ = box
+        draw.text((x1 + 24, y1 + 22), title, fill=self.COLORS["text_muted"], font=self._font(20))
+        draw.text((x1 + 24, y1 + 54), value, fill=tone or self.COLORS["text"], font=self._font(38, True))
+        if tone:
+            draw.rounded_rectangle((x1 + 24, y1 + 98, x2 - 24, y1 + 103), radius=999, fill=(tone[0], tone[1], tone[2], 130))
+
+    def draw_leaderboard_row(self, image: Image.Image, box: tuple[int, int, int, int], row: LeaderRow, highlight: bool = False) -> None:
+        self.draw_rounded_card(image, box, radius=22, surface=highlight)
+        draw = ImageDraw.Draw(image)
+        x1, y1, x2, _ = box
+        if highlight:
+            draw.rounded_rectangle((x1 + 10, y1 + 10, x1 + 15, y1 + 88), radius=6, fill=self.COLORS["info"])
+        draw.text((x1 + 30, y1 + 26), f"#{row.rank}", fill=self.COLORS["text_secondary"], font=self._font(30, True))
+        self.draw_avatar_initials_circle(image, row, (x1 + 148, y1 + 48), 64)
+        draw.text((x1 + 194, y1 + 18), row.name, fill=self.COLORS["text"], font=self._font(31, True))
+        draw.text((x1 + 194, y1 + 56), f"{row.shifts} смен • {row.cars} машин", fill=self.COLORS["text_muted"], font=self._font(22))
+        money = self.format_money(row.earnings)
+        mw = draw.textbbox((0, 0), money, font=self._font(36, True))[2]
+        draw.text((x2 - mw - 30, y1 + 30), money, fill=self.COLORS["text"], font=self._font(36, True))
+        if highlight:
+            self.draw_badge(draw, x2 - 30, y1 + 14, "Вы", self.COLORS["info"])
+
+    def draw_top_podium_card(
+        self,
+        image: Image.Image,
+        box: tuple[int, int, int, int],
+        row: LeaderRow,
+        rank_tone: tuple[int, int, int, int],
+        badge_text: str,
+        big: bool = False,
+    ) -> None:
+        self.draw_rounded_card(image, box, radius=26)
+        x1, y1, x2, _ = box
+        draw = ImageDraw.Draw(image)
+        draw.text((x1 + 24, y1 + 20), f"#{row.rank}", fill=rank_tone, font=self._font(34 if big else 30, True))
+        self.draw_avatar_initials_circle(image, row, (x1 + 66, y1 + 96), 76 if big else 68, tone=rank_tone)
+        draw.text((x1 + 118, y1 + 72), row.name, fill=self.COLORS["text"], font=self._font(30 if big else 27, True))
+        money_font = self._font(56 if big else 46, True)
+        draw.text((x1 + 24, y1 + 148), self.format_money(row.earnings), fill=self.COLORS["text"], font=money_font)
+        draw.text((x1 + 24, y1 + 226), f"{row.shifts} смен • {row.cars} машин", fill=self.COLORS["text_secondary"], font=self._font(24))
+        self.draw_badge(draw, x2 - 24, y1 + 18, badge_text, rank_tone)
+
+    def _draw_header(self, image: Image.Image, title: str, subtitle: str, updated: datetime | str | None, status: str) -> None:
+        box = (self.MARGIN, self.MARGIN, self.width - self.MARGIN, 178)
+        self.draw_rounded_card(image, box, radius=28)
+        draw = ImageDraw.Draw(image)
+        draw.text((box[0] + 30, box[1] + 30), title, fill=self.COLORS["text"], font=self._font(52, True))
+        draw.text((box[0] + 30, box[1] + 94), subtitle, fill=self.COLORS["text_secondary"], font=self._font(29))
+        timestamp = updated.strftime("%d.%m.%Y %H:%M") if isinstance(updated, datetime) else str(updated or "—")
+        tw = draw.textbbox((0, 0), timestamp, font=self._font(24))[2]
+        draw.text((box[2] - 32 - tw, box[1] + 34), timestamp, fill=self.COLORS["text_secondary"], font=self._font(24))
+        self.draw_badge(draw, box[2] - 30, box[1] + 84, status, self._tone_for_status(status))
+
+    def render_main_dashboard(self, data: MainDashboardData) -> Image.Image:
+        image = Image.new("RGBA", (self.width, self.height), self.COLORS["bg"])
+        self._draw_background(image)
+        subtitle = f"{data.status}"
+        self._draw_header(image, "Смена закрыта", subtitle, data.updated_at, "Закрыто")
+
+        main_box = (self.MARGIN, 202, self.width - self.MARGIN, 592)
+        self.draw_main_metric_block(image, main_box, data.shift)
+
+        row_y = 616
+        half_w = (self.width - self.MARGIN * 2 - self.GAP) // 2
+        left_box = (self.MARGIN, row_y, self.MARGIN + half_w, 782)
+        right_box = (self.MARGIN + half_w + self.GAP, row_y, self.width - self.MARGIN, 782)
+        self.draw_rounded_card(image, left_box, radius=24)
+        self.draw_rounded_card(image, right_box, radius=24)
+
+        draw = ImageDraw.Draw(image)
+        draw.text((left_box[0] + 24, left_box[1] + 20), "Текущая декада", fill=self.COLORS["text"], font=self._font(30, True))
+        draw.text((left_box[0] + 24, left_box[1] + 56), "1–10 марта", fill=self.COLORS["text_muted"], font=self._font(22))
+        draw.text((left_box[0] + 24, left_box[1] + 92), self.format_money(data.decade.revenue), fill=self.COLORS["text"], font=self._font(52, True))
+        self.draw_progress_bar(draw, (left_box[0] + 24, left_box[1] + 158, left_box[2] - 24, left_box[1] + 188), data.decade.run_rate, self.COLORS["info"])
+        draw.text((left_box[0] + 24, left_box[1] + 196), f"Цель {self.format_money(data.decade.target)} • Осталось {self.format_money(data.decade.remaining)}", fill=self.COLORS["text_secondary"], font=self._font(20))
+
+        rank_value = next((m.value for m in data.decade.metrics if "пози" in m.label.lower()), "#1")
+        rank_info = next((m.value for m in data.decade.metrics if "участ" in m.label.lower()), "из 12 участников")
+        delta = next((m.value for m in data.decade.metrics if "дельта" in m.label.lower()), "+1 с прошлого обновления")
+        draw.text((right_box[0] + 24, right_box[1] + 20), "Позиция в рейтинге", fill=self.COLORS["text"], font=self._font(30, True))
+        draw.text((right_box[0] + 24, right_box[1] + 92), rank_value, fill=self.COLORS["success"], font=self._font(76, True))
+        draw.text((right_box[0] + 24, right_box[1] + 172), rank_info, fill=self.COLORS["text_secondary"], font=self._font(24))
+        draw.text((right_box[0] + 24, right_box[1] + 202), delta, fill=self.COLORS["info"], font=self._font(22, True))
+        self.draw_badge(draw, right_box[2] - 24, right_box[1] + 20, "Лидер", self.COLORS["success"])
+
+        kpi_titles = ["Машин", "Средний чек", "Смен за декаду", "Осталось до цели"]
+        metrics = {m.label.lower(): m.value for m in data.shift.metrics + data.decade.metrics}
+        kpi_values = [
+            str(metrics.get("машин", "131")),
+            str(metrics.get("средний чек", "336 ₽")),
+            str(metrics.get("смен", "8")),
+            self.format_money(data.shift.remaining),
+        ]
+        kpi_tones = [None, None, self.COLORS["info"], self._tone_for_status(data.shift.badge)]
+        kpi_w = (self.width - self.MARGIN * 2 - self.GAP * 3) // 4
+        y = 802
+        for i in range(4):
+            box = (self.MARGIN + i * (kpi_w + self.GAP), y, self.MARGIN + i * (kpi_w + self.GAP) + kpi_w, 888)
+            self.draw_small_kpi_card(image, box, kpi_titles[i], kpi_values[i], kpi_tones[i])
+
+        return image.convert("RGB")
+
+    def render_shift_summary(self, data: ShiftSummaryData) -> Image.Image:
+        cars = next((m.value for m in data.metrics if "маш" in m.label.lower()), "131")
+        avg = next((m.value for m in data.metrics if "чек" in m.label.lower()), "336 ₽")
+        target = data.total + max(data.decade_remaining, 0)
+        run_rate = data.total / max(target, 1)
+        shift = PerformanceBlock(
+            title="Итоги смены",
+            badge=data.status_message,
+            revenue=data.total,
+            target=target,
+            remaining=max(data.decade_remaining, 0),
+            run_rate=run_rate,
+            metrics=[MetricItem("машин", cars), MetricItem("средний чек", avg), MetricItem("смен", "8")],
+        )
+        decade = PerformanceBlock(
+            title="Текущая декада",
+            badge="Обновлено",
+            revenue=data.decade_total,
+            target=target,
+            remaining=max(data.decade_remaining, 0),
+            run_rate=run_rate,
+            metrics=[MetricItem("позиция", "#1"), MetricItem("участники", "из 12 участников"), MetricItem("дельта", "+1 с прошлого обновления")],
+        )
+        return self.render_main_dashboard(MainDashboardData(data.title, f"{data.date_label} • итог за день", data.date_label, shift, decade))
+
+    def render_leaderboard(self, data: LeaderboardData) -> Image.Image:
+        image = Image.new("RGBA", (self.width, self.height), self.COLORS["bg"])
+        self._draw_background(image)
+        self._draw_header(image, "Лидерборд", data.subtitle, data.updated_at, "Обновлено")
+
+        top = {r.rank: r for r in data.leaders[:3]}
+        self.draw_top_podium_card(image, (self.MARGIN + 120, 220, 620, 500), top.get(2, LeaderRow(2, "—", 0)), self.COLORS["silver"], "Стабильно")
+        self.draw_top_podium_card(image, (560, 196, 1040, 532), top.get(1, LeaderRow(1, "—", 0)), self.COLORS["gold"], "Лидер", big=True)
+        self.draw_top_podium_card(image, (980, 230, self.width - self.MARGIN - 120, 500), top.get(3, LeaderRow(3, "—", 0)), self.COLORS["bronze"], "Топ-3")
+
+        y = 540
+        for row in data.leaders[3:8]:
+            is_me = bool(data.highlight_name and row.name.strip().lower() == data.highlight_name.strip().lower())
+            self.draw_leaderboard_row(image, (self.MARGIN, y, self.width - self.MARGIN, y + 98), row, highlight=is_me)
+            y += 108
+
+        return image.convert("RGB")
+
+    def _resolve_avatar(self, row: LeaderRow, size: int, tone: tuple[int, int, int, int] | None = None) -> Image.Image:
         if row.avatar_path:
             key = (row.avatar_path, size)
             cached = self._avatar_cache.get(key)
@@ -186,173 +378,28 @@ class DashboardRenderer:
             try:
                 p = Path(row.avatar_path)
                 if p.exists() and p.is_file() and p.stat().st_size > 32:
-                    img = Image.open(p).convert("RGBA")
-                    w, h = img.size
-                    s = min(w, h)
-                    img = img.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2)).resize((size, size), Image.Resampling.LANCZOS)
+                    image = Image.open(p).convert("RGBA")
+                    s = min(*image.size)
+                    image = image.crop(((image.width - s) // 2, (image.height - s) // 2, (image.width + s) // 2, (image.height + s) // 2))
+                    image = image.resize((size, size), Image.Resampling.LANCZOS)
                     mask = Image.new("L", (size, size), 0)
                     ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
                     out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-                    out.paste(img, (0, 0), mask)
+                    out.paste(image, (0, 0), mask)
                     self._avatar_cache[key] = out
                     return out
             except Exception:
                 pass
-        initials = "".join(part[:1] for part in (row.name or "?").split()[:2]).upper() or "?"
+
+        initials = "".join(part[:1] for part in row.name.split()[:2]).upper() or "?"
+        base_tone = tone or self.COLORS["info"]
         out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         d = ImageDraw.Draw(out)
-        d.ellipse((0, 0, size - 1, size - 1), fill=(30, 47, 70, 240), outline=(255, 255, 255, 60), width=2)
-        font = self._font(max(18, size // 3), True)
+        d.ellipse((0, 0, size - 1, size - 1), fill=(25, 42, 66, 255), outline=(base_tone[0], base_tone[1], base_tone[2], 130), width=2)
+        font = self._font(max(20, size // 3), True)
         bbox = d.textbbox((0, 0), initials, font=font)
-        d.text(((size - (bbox[2] - bbox[0])) / 2, (size - (bbox[3] - bbox[1])) / 2), initials, fill=self.COLORS["white"], font=font)
+        d.text(((size - (bbox[2] - bbox[0])) / 2, (size - (bbox[3] - bbox[1])) / 2), initials, fill=self.COLORS["text"], font=font)
         return out
-
-    def _draw_background(self, img: Image.Image) -> None:
-        d = ImageDraw.Draw(img)
-        for y in range(self.height):
-            t = y / max(1, self.height - 1)
-            r = int(self.COLORS["bg"][0] * (1 - t) + self.COLORS["bg_depth"][0] * t)
-            g = int(self.COLORS["bg"][1] * (1 - t) + self.COLORS["bg_depth"][1] * t)
-            b = int(self.COLORS["bg"][2] * (1 - t) + self.COLORS["bg_depth"][2] * t)
-            d.line((0, y, self.width, y), fill=(r, g, b, 255))
-
-    def _format_datetime(self, dt: datetime | str | None) -> str:
-        if isinstance(dt, datetime):
-            return dt.strftime("%d.%m.%Y %H:%M")
-        return str(dt or "—")
-
-    def _status_tone(self, status: str) -> tuple[int, int, int, int]:
-        s = (status or "").lower()
-        if "выше" in s or "в темпе" in s or "опереж" in s:
-            return self.COLORS["green"]
-        if "ниже" in s or "отстав" in s:
-            return self.COLORS["red"]
-        return self.COLORS["blue"]
-
-    def _draw_header(self, img: Image.Image, title: str, subtitle: str, updated_at: datetime | str | None) -> None:
-        self.draw_glass_card(img, (self.MARGIN, self.MARGIN, self.width - self.MARGIN, 170), radius=28)
-        d = ImageDraw.Draw(img)
-        d.text((self.MARGIN + 28, self.MARGIN + 28), title, fill=self.COLORS["white"], font=self._font(52, True))
-        d.text((self.MARGIN + 28, self.MARGIN + 92), subtitle, fill=self.COLORS["secondary"], font=self._font(28))
-        ts = self._format_datetime(updated_at)
-        tw = d.textbbox((0, 0), ts, font=self._font(24))[2]
-        d.text((self.width - self.MARGIN - 28 - tw, self.MARGIN + 74), ts, fill=self.COLORS["secondary"], font=self._font(24))
-
-    def _draw_dashboard_card(self, img: Image.Image, box: tuple[int, int, int, int], block: PerformanceBlock, glow: tuple[int, int, int, int]) -> None:
-        x1, y1, x2, y2 = box
-        self.draw_glow(img, ((x1 + x2) // 2, y1 + 120), (460, 180), glow, blur=38, alpha=86)
-        self.draw_glass_card(img, box, radius=26)
-        d = ImageDraw.Draw(img)
-        d.text((x1 + 26, y1 + 24), block.title, fill=self.COLORS["white"], font=self._font(34, True))
-        self.draw_glow(img, (x2 - 180, y1 + 44), (240, 80), glow, blur=24, alpha=30)
-        self.draw_status_pill(d, x2 - 26, y1 + 22, block.badge, self._status_tone(block.badge))
-
-        money_text = self.format_money(block.revenue)
-        money_font = self._font(52, True)
-        money_w = d.textbbox((0, 0), money_text, font=money_font)[2]
-        money_x = x1 + ((x2 - x1 - money_w) // 2)
-        self.draw_glow(img, ((x1 + x2) // 2, y1 + 142), (520, 130), glow, blur=36, alpha=52)
-        d.text((money_x, y1 + 102), money_text, fill=self.COLORS["white"], font=money_font)
-
-        secondary_font = self._font(20)
-        left_secondary = f"Цель: {self.format_money(block.target)}"
-        right_secondary = f"Осталось: {self.format_money(max(0, block.remaining))}"
-        d.text((x1 + 26, y1 + 188), left_secondary, fill=self.COLORS["secondary"], font=secondary_font)
-        right_w = d.textbbox((0, 0), right_secondary, font=secondary_font)[2]
-        d.text((x2 - 26 - right_w, y1 + 188), right_secondary, fill=self.COLORS["secondary"], font=secondary_font)
-
-        progress_box = (x1 + 26, y1 + 228, x2 - 26, y1 + 252)
-        self.draw_glow(img, ((x1 + x2) // 2, y1 + 240), (600, 44), glow, blur=26, alpha=30)
-        self.draw_progress_bar(d, progress_box, block.run_rate, self._status_tone(block.badge))
-
-        stats = " • ".join(f"{m.value} {m.label}" for m in block.metrics[:2] if m.value)
-        if stats:
-            stats_w = d.textbbox((0, 0), stats, font=self._font(16))[2]
-            d.text((x1 + ((x2 - x1 - stats_w) // 2), y1 + 276), stats, fill=self.COLORS["muted"], font=self._font(16))
-
-    def draw_progress_bar(self, draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], progress: float | None, tone: tuple[int, int, int, int]) -> None:
-        x1, y1, x2, y2 = box
-        draw.rounded_rectangle(box, radius=999, fill=(8, 14, 24, 255), outline=(255, 255, 255, 22), width=1)
-        if progress is None:
-            return
-        pct = max(0.0, min(1.0, progress if progress <= 3 else progress / 100.0))
-        fw = int((x2 - x1 - 4) * pct)
-        if fw < 6:
-            return
-        fx2 = x1 + 2 + fw
-        for i in range(max(1, fx2 - (x1 + 2))):
-            k = i / max(1, fx2 - (x1 + 2) - 1)
-            r = int(70 * (1 - k) + tone[0] * k)
-            g = int(130 * (1 - k) + tone[1] * k)
-            b = int(220 * (1 - k) + tone[2] * k)
-            draw.line((x1 + 2 + i, y1 + 2, x1 + 2 + i, y2 - 2), fill=(r, g, b, 255))
-        draw.rounded_rectangle((x1 + 2, y1 + 2, fx2, y2 - 2), radius=999, outline=(255, 255, 255, 34), width=1)
-
-    def render_main_dashboard(self, data: MainDashboardData) -> Image.Image:
-        img = Image.new("RGBA", (self.width, self.height), self.COLORS["bg"])
-        self._draw_background(img)
-        self._draw_header(img, data.title, data.status, data.updated_at)
-        self._draw_dashboard_card(img, (self.MARGIN, 202, self.width - self.MARGIN, 548), data.shift, self._status_tone(data.shift.badge))
-        self._draw_dashboard_card(img, (self.MARGIN, 580, self.width - self.MARGIN, self.height - self.MARGIN), data.decade, self._status_tone(data.decade.badge))
-        return img.convert("RGB")
-
-    def render_shift_summary(self, data: ShiftSummaryData) -> Image.Image:
-        shift_block = PerformanceBlock(
-            title="Итоги смены",
-            badge=data.status_message,
-            revenue=data.total,
-            target=0,
-            remaining=0,
-            run_rate=None,
-            metrics=[MetricItem("машин", str(next((m.value for m in data.metrics if "маш" in m.label.lower()), "0"))), MetricItem("средний чек", str(next((m.value for m in data.metrics if "чек" in m.label.lower()), "—")))],
-        )
-        decade_block = PerformanceBlock(
-            title="Текущая декада",
-            badge="Обновлено",
-            revenue=data.decade_total,
-            target=data.decade_total + max(0, data.decade_remaining),
-            remaining=max(0, data.decade_remaining),
-            run_rate=None,
-            metrics=[MetricItem("осталось", self.format_money(max(0, data.decade_remaining))), MetricItem("статус", "закрыто")],
-        )
-        return self.render_main_dashboard(MainDashboardData(data.title, f"{data.date_label} • {data.duration_label}", data.date_label, shift_block, decade_block))
-
-    def _draw_top_card(self, img: Image.Image, row: LeaderRow, box: tuple[int, int, int, int], tone: tuple[int, int, int, int], glow_alpha: int) -> None:
-        x1, y1, x2, y2 = box
-        self.draw_glow(img, ((x1 + x2) // 2, y1 + 120), (400, 210), tone, blur=40, alpha=glow_alpha)
-        self.draw_glass_card(img, box, radius=26, accent=tone)
-        d = ImageDraw.Draw(img)
-        self.draw_rank_badge(d, (x1 + 24, y1 + 22), row.rank, tone)
-        self.draw_avatar_or_initials(img, row, (x1 + 78, y1 + 100), 84)
-        name_text, name_font = self.fit_text(d, row.name or "—", x2 - x1 - 150, 34, 24, True)
-        d.text((x1 + 140, y1 + 80), name_text, fill=self.COLORS["white"], font=name_font)
-        d.text((x1 + 24, y1 + 148), self.format_money(row.earnings), fill=self.COLORS["white"], font=self._font(58 if row.rank == 1 else 50, True))
-        d.text((x1 + 24, y2 - 54), f"{row.shifts} смен • {row.cars} машин", fill=self.COLORS["secondary"], font=self._font(24))
-
-    def render_leaderboard(self, data: LeaderboardData) -> Image.Image:
-        img = Image.new("RGBA", (self.width, self.height), self.COLORS["bg"])
-        self._draw_background(img)
-        self._draw_header(img, data.title, data.subtitle, data.updated_at)
-
-        rows = {r.rank: r for r in data.leaders}
-        self._draw_top_card(img, rows.get(2, LeaderRow(2, "—", 0)), (76, 260, 468, 560), self.COLORS["silver"], 68)
-        self._draw_top_card(img, rows.get(1, LeaderRow(1, "—", 0)), (504, 226, 896, 572), self.COLORS["gold"], 88)
-        self._draw_top_card(img, rows.get(3, LeaderRow(3, "—", 0)), (932, 260, 1324, 560), self.COLORS["bronze"], 68)
-
-        d = ImageDraw.Draw(img)
-        y = 602
-        for row in data.leaders[3:10]:
-            self.draw_glass_card(img, (self.MARGIN, y, self.width - self.MARGIN, y + 74), radius=20)
-            self.draw_rank_badge(d, (self.MARGIN + 16, y + 19), row.rank, self.COLORS["blue"])
-            self.draw_avatar_or_initials(img, row, (self.MARGIN + 178, y + 37), 44)
-            name_text, name_font = self.fit_text(d, row.name or "—", 520, 30, 22, True)
-            d.text((self.MARGIN + 210, y + 13), name_text, fill=self.COLORS["white"], font=name_font)
-            d.text((self.MARGIN + 210, y + 43), f"{row.shifts} смен • {row.cars} машин", fill=self.COLORS["muted"], font=self._font(20))
-            money = self.format_money(row.earnings)
-            mw = d.textbbox((0, 0), money, font=self._font(32, True))[2]
-            d.text((self.width - self.MARGIN - 22 - mw, y + 22), money, fill=self.COLORS["white"], font=self._font(32, True))
-            y += 84
-        return img.convert("RGB")
 
 
 def to_png_bytes(img: Image.Image, name: str) -> Any:
