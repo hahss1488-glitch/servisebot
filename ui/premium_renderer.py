@@ -42,6 +42,9 @@ def _pct(value: Any) -> float | None:
 
 def render_dashboard_image_bytes(mode: str, payload: dict) -> BytesIO:
     if mode == "open":
+        mini = payload.get("mini") or []
+        mini_income_per_hour = mini[1] if len(mini) > 1 else "Доход в час: —"
+        mini_avg_check = mini[2] if len(mini) > 2 else "Средний чек: —"
         shift = PerformanceBlock(
             title="Текущая смена",
             badge="В темпе" if (_pct(payload.get("today_progress")) or 0) >= 0.9 else "Ниже плана",
@@ -51,8 +54,8 @@ def render_dashboard_image_bytes(mode: str, payload: dict) -> BytesIO:
             run_rate=_pct(payload.get("today_progress")),
             metrics=[
                 MetricItem("Машин", str(int(payload.get("shift_cars") or 0))),
-                MetricItem("Средний чек", payload.get("mini", ["", "", "—"])[2].split(":", 1)[-1].strip() if payload.get("mini") else "—"),
-                MetricItem("Доход в час", payload.get("mini", ["", "", "—"])[1].split(":", 1)[-1].strip() if payload.get("mini") else "—"),
+                MetricItem("Средний чек", str(mini_avg_check).split(":", 1)[-1].strip() or "—"),
+                MetricItem("Доход в час", str(mini_income_per_hour).split(":", 1)[-1].strip() or "—"),
                 MetricItem("Время смены", payload.get("shift_start_label", "—")),
             ],
         )
@@ -90,6 +93,7 @@ def render_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict]
             earnings=int(row.get("total_amount") or 0),
             cars=int(row.get("cars_count") or 0) if row.get("cars_count") is not None else None,
             income_per_hour=int(row.get("avg_per_hour") or 0) if row.get("avg_per_hour") is not None else None,
+            avatar_path=str(row.get("avatar_path") or "") or None,
         )
         for i, row in enumerate(decade_leaders, start=1)
     ]

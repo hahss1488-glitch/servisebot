@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -53,6 +54,7 @@ class LeaderRow:
     earnings: int
     cars: int | None = None
     income_per_hour: int | None = None
+    avatar_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -77,6 +79,7 @@ class DashboardRenderer:
     GOOD = "#3AD07A"
     WARN = "#F2A546"
     BAD = "#E96363"
+    _avatar_cache: dict[tuple[str, int], Image.Image] = {}
 
     def __init__(self, width: int = WIDTH, height: int = HEIGHT) -> None:
         self.width = width
@@ -102,6 +105,61 @@ class DashboardRenderer:
     def _new_canvas(self) -> tuple[Image.Image, ImageDraw.ImageDraw]:
         img = Image.new("RGB", (self.width, self.height), self.BG)
         return img, ImageDraw.Draw(img)
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(round(float(value)))
+        except Exception:
+            return default
+
+    @staticmethod
+    def _safe_float(value: Any) -> float | None:
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _format_money(self, value: Any, default: str = "0 ₽") -> str:
+        n = self._safe_int(value, default=0)
+        return f"{n:,} ₽".replace(",", " ") if n or default == "0 ₽" else default
+
+    def _format_number(self, value: Any, default: str = "—") -> str:
+        n = self._safe_int(value, default=0)
+        return f"{n:,}".replace(",", " ") if n else default
+
+    def _avatar_placeholder(self, size: int, initials: str = "?") -> Image.Image:
+        img = Image.new("RGBA", (size, size), (20, 34, 49, 255))
+        d = ImageDraw.Draw(img)
+        d.ellipse((0, 0, size - 1, size - 1), fill="#203245", outline="#32465B", width=2)
+        text = (initials or "?")[:2].upper()
+        b = d.textbbox((0, 0), text, font=self._font(max(16, size // 3), True))
+        d.text(((size - (b[2] - b[0])) / 2, (size - (b[3] - b[1])) / 2), text, fill="#DCE6F7", font=self._font(max(16, size // 3), True))
+        return img
+
+    def _resolve_avatar(self, row: LeaderRow, size: int) -> Image.Image:
+        if row.avatar_path:
+            key = (row.avatar_path, size)
+            cached = self._avatar_cache.get(key)
+            if cached is not None:
+                return cached
+            try:
+                p = Path(row.avatar_path)
+                if p.exists() and p.is_file():
+                    img = Image.open(p).convert("RGBA")
+                    w, h = img.size
+                    s = min(w, h)
+                    img = img.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2)).resize((size, size), Image.Resampling.LANCZOS)
+                    mask = Image.new("L", (size, size), 0)
+                    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+                    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+                    out.paste(img, (0, 0), mask)
+                    self._avatar_cache[key] = out
+                    return out
+            except Exception:
+                pass
+        initials = "".join(part[:1] for part in row.name.split()[:2]).upper() or "?"
+        return self._avatar_placeholder(size, initials)
 
     def draw_card(self, draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], radius: int = 24):
         x1, y1, x2, y2 = box
@@ -149,9 +207,9 @@ class DashboardRenderer:
         x1, y1, x2, y2 = box
         draw.text((x1 + 28, y1 + 22), block.title, fill=self.TEXT, font=self._font(34, True))
         self.draw_badge(draw, x2 - 260, y1 + 20, block.badge)
-        draw.text((x1 + 28, y1 + 78), f"{block.revenue:,} ₽".replace(",", " "), fill=self.TEXT, font=self._font(72, True))
-        draw.text((x1 + 30, y1 + 168), f"Цель: {block.target:,} ₽".replace(",", " "), fill=self.MUTED, font=self._font(28))
-        draw.text((x1 + 30, y1 + 202), f"Осталось: {max(block.remaining, 0):,} ₽".replace(",", " "), fill=self.MUTED, font=self._font(28))
+        draw.text((x1 + 28, y1 + 78), self._format_money(block.revenue), fill=self.TEXT, font=self._font(72, True))
+        draw.text((x1 + 30, y1 + 168), f"Цель: {self._format_money(block.target)}", fill=self.MUTED, font=self._font(28))
+        draw.text((x1 + 30, y1 + 202), f"Осталось: {self._format_money(max(self._safe_int(block.remaining), 0))}", fill=self.MUTED, font=self._font(28))
         rr = "—" if block.run_rate is None else f"{int(round((block.run_rate * 100) if block.run_rate <= 3 else block.run_rate))}%"
         color = self._runrate_color(block.run_rate)
         draw.text((x1 + 30, y1 + 242), "Run rate", fill=self.MUTED, font=self._font(24))
@@ -201,25 +259,37 @@ class DashboardRenderer:
     def render_leaderboard(self, data: LeaderboardData) -> Image.Image:
         img, draw = self._new_canvas()
         self.draw_header(draw, data.title, data.subtitle, data.updated_at)
-        top3 = data.leaders[:3]
-        cards = [(60, 190, 460, 470), (500, 170, 900, 490), (940, 190, 1340, 470)]
-        for idx, row in enumerate(top3):
-            x1, y1, x2, y2 = cards[idx]
-            self.draw_card(draw, (x1, y1, x2, y2), 22)
-            draw.text((x1 + 18, y1 + 16), f"#{row.rank}", fill=self.ACCENT, font=self._font(30, True))
-            draw.text((x1 + 18, y1 + 58), row.name[:18], fill=self.TEXT, font=self._font(32, True))
-            draw.text((x1 + 18, y1 + 104), f"{row.earnings:,} ₽".replace(",", " "), fill=self.TEXT, font=self._font(44, True))
+        slots = {2: (70, 210, 470, 500, "#78A8CC"), 1: (500, 190, 900, 530, "#B99B52"), 3: (930, 210, 1330, 500, "#A87E5D")}
+        by_rank = {row.rank: row for row in data.leaders[:3]}
+        for rank in (2, 1, 3):
+            row = by_rank.get(rank)
+            if not row:
+                continue
+            x1, y1, x2, y2, accent = slots[rank]
+            self.draw_card(draw, (x1, y1, x2, y2), 26)
+            draw.rounded_rectangle((x1 + 2, y1 + 2, x2 - 2, y1 + 58), radius=24, fill="#1A2735", outline=accent)
+            draw.text((x1 + 18, y1 + 14), f"#{rank}", fill=accent, font=self._font(28, True))
+            avatar = self._resolve_avatar(row, 96 if rank == 1 else 82)
+            img.paste(avatar, (x1 + 26, y1 + 74), avatar)
+            draw.text((x1 + 138, y1 + 84), row.name[:18], fill=self.TEXT, font=self._font(34 if rank == 1 else 30, True))
+            draw.text((x1 + 26, y1 + 182), self._format_money(row.earnings), fill=self.TEXT, font=self._font(54 if rank == 1 else 46, True))
+            draw.text((x1 + 26, y2 - 88), "Смен", fill=self.MUTED, font=self._font(20))
+            draw.text((x1 + 26, y2 - 56), str(self._safe_int(row.cars, 0)), fill=self.TEXT, font=self._font(28, True))
+            draw.text((x1 + 180, y2 - 88), "₽/ч", fill=self.MUTED, font=self._font(20))
+            draw.text((x1 + 180, y2 - 56), self._format_number(row.income_per_hour), fill=self.TEXT, font=self._font(28, True))
 
-        y = 510
+        y = 548
         for row in data.leaders[3:11]:
-            self.draw_card(draw, (60, y, 1340, y + 48), radius=14)
-            draw.text((76, y + 10), f"#{row.rank}", fill=self.ACCENT, font=self._font(24, True))
-            draw.text((170, y + 10), row.name[:24], fill=self.TEXT, font=self._font(24, True))
-            draw.text((760, y + 10), f"{row.cars or 0}", fill=self.MUTED, font=self._font(22))
-            iph = "—" if row.income_per_hour is None else f"{row.income_per_hour} ₽/ч"
-            draw.text((880, y + 10), iph, fill=self.MUTED, font=self._font(22))
-            draw.text((1140, y + 10), f"{row.earnings:,} ₽".replace(",", " "), fill=self.TEXT, font=self._font(24, True))
-            y += 56
+            self.draw_card(draw, (60, y, 1340, y + 58), radius=18)
+            draw.text((82, y + 16), f"#{row.rank}", fill=self.ACCENT, font=self._font(24, True))
+            avatar = self._resolve_avatar(row, 36)
+            img.paste(avatar, (178, y + 11), avatar)
+            draw.text((224, y + 16), row.name[:26], fill=self.TEXT, font=self._font(24, True))
+            draw.text((650, y + 16), f"{self._safe_int(row.cars, 0)} смен", fill=self.MUTED, font=self._font(22))
+            iph = f"{self._format_number(row.income_per_hour)} ₽/ч" if row.income_per_hour is not None else "— ₽/ч"
+            draw.text((850, y + 16), iph, fill=self.MUTED, font=self._font(22))
+            draw.text((1120, y + 16), self._format_money(row.earnings), fill=self.TEXT, font=self._font(24, True))
+            y += 68
         return img
 
 

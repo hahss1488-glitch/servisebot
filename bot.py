@@ -59,6 +59,7 @@ TRIAL_DAYS = 7
 SUBSCRIPTION_PRICE_TEXT = "200 ₽/месяц"
 SUBSCRIPTION_CONTACT = "@dakonoplev2"
 AVATAR_CACHE_DIR = Path("cache/avatars")
+CUSTOM_AVATAR_DIR = AVATAR_CACHE_DIR / "custom"
 AVATAR_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 MONTH_NAMES = {
@@ -316,6 +317,46 @@ def get_price_mode(context: CallbackContext, user_id: int | None = None) -> str:
 
 def format_decade_range(start: date, end: date) -> str:
     return f"{start.day:02d}.{start.month:02d}–{end.day:02d}.{end.month:02d}"
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(round(float(value)))
+    except Exception:
+        return default
+
+
+def resolve_user_avatar_path(user_id: int) -> str:
+    settings = DatabaseManager.get_avatar_settings(user_id)
+    source = settings.get("avatar_source", "telegram")
+    custom = settings.get("custom_avatar_path", "")
+    tg = settings.get("telegram_avatar_path", "")
+    if source == "custom" and custom and Path(custom).exists():
+        return custom
+    if tg and Path(tg).exists():
+        return tg
+    return ""
+
+
+async def _refresh_telegram_avatar_cache(context: CallbackContext, telegram_id: int, user_id: int) -> str:
+    AVATAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache = AVATAR_CACHE_DIR / f"tg_{telegram_id}.jpg"
+    if cache.exists() and (datetime.now().timestamp() - cache.stat().st_mtime) <= AVATAR_CACHE_TTL_SECONDS:
+        DatabaseManager.set_telegram_avatar_path(user_id, str(cache))
+        return str(cache)
+    try:
+        photos = await context.bot.get_user_profile_photos(user_id=telegram_id, limit=1)
+        if not photos or not photos.photos:
+            return ""
+        file_id = photos.photos[0][-1].file_id
+        file = await context.bot.get_file(file_id)
+        data = await file.download_as_bytearray()
+        cache.write_bytes(bytes(data))
+        DatabaseManager.set_telegram_avatar_path(user_id, str(cache))
+        return str(cache)
+    except Exception:
+        logger.exception("telegram avatar refresh failed telegram_id=%s", telegram_id)
+        return ""
 
 
 def get_decade_period(target: date | None = None):
@@ -1749,6 +1790,21 @@ async def handle_media_message(update: Update, context: CallbackContext):
             await update.message.reply_text("✅ Видео FAQ обновлено. Пользователи будут получать его как полноценное видео.")
             return
 
+    if db_user_for_access and context.user_data.get("awaiting_profile_avatar"):
+        photo = update.message.photo[-1] if update.message.photo else None
+        if not photo:
+            await update.message.reply_text("Пришли именно фото, чтобы установить аватар.")
+            return
+        CUSTOM_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+        file = await context.bot.get_file(photo.file_id)
+        avatar_path = CUSTOM_AVATAR_DIR / f"{db_user_for_access['id']}.jpg"
+        data = await file.download_as_bytearray()
+        avatar_path.write_bytes(bytes(data))
+        DatabaseManager.set_custom_avatar(db_user_for_access["id"], str(avatar_path))
+        context.user_data.pop("awaiting_profile_avatar", None)
+        await update.message.reply_text("✅ Кастомный аватар сохранён.")
+        return
+
 
 async def handle_message(update: Update, context: CallbackContext):
     """Обработка текстовых сообщений"""
@@ -2189,6 +2245,8 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "subscription_info_photo": subscription_info_photo_callback,
         "account_info": account_info_callback,
         "profile_change_name": profile_change_name_callback,
+        "profile_avatar_upload": profile_avatar_upload_callback,
+        "profile_avatar_reset": profile_avatar_reset_callback,
         "show_price": show_price_callback,
         "calendar_open": calendar_callback,
         "nav:back": nav_back_callback,
@@ -3245,11 +3303,15 @@ def build_profile_text(db_user: dict, telegram_id: int) -> str:
     status_text = "✅ Подписка активна" if is_subscription_active(db_user) else "⛔ Подписка неактивна"
     total_cars = DatabaseManager.get_cars_count_between_dates(db_user["id"], "2000-01-01", "2100-01-01")
     total_earned = DatabaseManager.get_user_total_between_dates(db_user["id"], "2000-01-01", "2100-01-01")
+    avatar_meta = DatabaseManager.get_avatar_settings(db_user["id"])
+    source_map = {"custom": "кастомный", "telegram": "Telegram/дефолт"}
+    avatar_source = source_map.get(avatar_meta.get("avatar_source", "telegram"), "Telegram/дефолт")
     return (
         f"👤 Профиль: {db_user.get('name', 'Пользователь')}\n"
         f"ID: {telegram_id}\n\n"
         f"Статус: {status_text}\n"
         f"Действует до: {expires_text}\n\n"
+        f"Аватар: {avatar_source}\n\n"
         f"Всего сделано машин: {total_cars}\n"
         f"Всего заработано: {format_money(total_earned)}"
     )
@@ -3259,6 +3321,8 @@ def build_profile_keyboard(db_user: dict, telegram_id: int) -> InlineKeyboardMar
     callback = "subscription_info_photo" if get_section_photo_file_id("profile") else "subscription_info"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Изменить имя", callback_data="profile_change_name")],
+        [InlineKeyboardButton("📸 Загрузить аватар", callback_data="profile_avatar_upload")],
+        [InlineKeyboardButton("♻️ Сбросить аватар", callback_data="profile_avatar_reset")],
         [InlineKeyboardButton("Купить подписку", callback_data=callback)],
     ])
 
@@ -3274,6 +3338,22 @@ async def profile_change_name_callback(query, context):
         await query.edit_message_text(prompt)
     except Exception:
         await query.message.reply_text(prompt)
+
+
+async def profile_avatar_upload_callback(query, context):
+    context.user_data["awaiting_profile_avatar"] = True
+    await query.edit_message_text("Отправь фото одним сообщением — сохраним как кастомный аватар.")
+
+
+async def profile_avatar_reset_callback(query, context):
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+    DatabaseManager.reset_avatar_source(db_user["id"])
+    text = build_profile_text(db_user, query.from_user.id)
+    kb = build_profile_keyboard(db_user, query.from_user.id)
+    await query.edit_message_text(text, reply_markup=kb)
 
 
 SECTION_MEDIA_KEYS = {
@@ -4546,6 +4626,14 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
     return render_leaderboard_image_bytes(decade_title, decade_leaders, highlight_name=highlight_name, top3_avatars=top3_avatars, updated_at=now_local())
 
 
+def build_dashboard_image_bytes_open(payload: dict) -> BytesIO | None:
+    return _build_dashboard_image("open", payload)
+
+
+def build_dashboard_image_bytes_closed(payload: dict) -> BytesIO | None:
+    return _build_dashboard_image("closed", payload)
+
+
 async def build_dashboard_image_cached(mode: str, user_id: int, payload: dict) -> BytesIO | None:
     key = f"{mode}:{user_id}"
     cached = _cache_get(_DASHBOARD_CACHE, key)
@@ -4568,7 +4656,14 @@ async def send_leaderboard_output(chat_target, context: CallbackContext, decade_
     image = None
     if is_images_mode_enabled(db_user):
         try:
-            image = await asyncio.to_thread(build_leaderboard_image_bytes, decade_title, decade_leaders, highlight_name)
+            enriched = []
+            for row in decade_leaders:
+                enriched_row = dict(row)
+                uid = _safe_int(row.get("user_id"), 0)
+                if uid > 0:
+                    enriched_row["avatar_path"] = resolve_user_avatar_path(uid)
+                enriched.append(enriched_row)
+            image = await asyncio.to_thread(build_leaderboard_image_bytes, decade_title, enriched, highlight_name)
         except Exception:
             logger.exception("leaderboard image render failed")
     if image is not None:
@@ -4584,6 +4679,9 @@ async def leaderboard(query, context):
     decade_leaders = await asyncio.to_thread(get_cached_decade_leaderboard, today.year, today.month, idx)
 
     db_user = DatabaseManager.get_user(query.from_user.id)
+    if db_user:
+        await _refresh_telegram_avatar_cache(context, query.from_user.id, db_user["id"])
+
     has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
     highlight_name = db_user["name"] if db_user else (query.from_user.first_name or "")
     await query.edit_message_text("🏆 Формирую рейтинг...")
