@@ -15,9 +15,10 @@ import importlib.util
 import random
 from pathlib import Path
 from io import BytesIO
-from typing import List
+from typing import Any, List
 import csv
 import shutil
+from dataclasses import dataclass
 
 from telegram import (
     Update,
@@ -131,22 +132,146 @@ FAST_SERVICE_ALIASES = {
 }
 
 
-def parse_fast_car_with_services(text: str) -> tuple[str | None, list[int]]:
-    parts = [p.strip(" ,.;:!?").lower() for p in text.split() if p.strip()]
+@dataclass(slots=True)
+class FastServiceToken:
+    service_id: int
+    quantity: int = 1
+    half_price: bool = False
+
+
+@dataclass(slots=True)
+class FastParseResult:
+    car_number: str | None
+    services: list[FastServiceToken]
+    error_message: str = ""
+
+
+@dataclass(slots=True)
+class CacheEntry:
+    value: Any
+    expires_at: datetime
+
+
+_SHORT_CACHE_SECONDS = 20
+_DASHBOARD_CACHE: dict[str, CacheEntry] = {}
+_LEADERBOARD_CACHE: dict[str, CacheEntry] = {}
+
+
+def _cache_get(cache: dict[str, CacheEntry], key: str) -> Any | None:
+    item = cache.get(key)
+    if not item:
+        return None
+    if item.expires_at < now_local():
+        cache.pop(key, None)
+        return None
+    return item.value
+
+
+def _cache_set(cache: dict[str, CacheEntry], key: str, value: Any, ttl_seconds: int = _SHORT_CACHE_SECONDS) -> Any:
+    cache[key] = CacheEntry(value=value, expires_at=now_local() + timedelta(seconds=ttl_seconds))
+    return value
+
+
+
+
+def get_cached_decade_leaderboard(year: int, month: int, idx: int) -> list[dict]:
+    key = f"leaders:{year:04d}-{month:02d}-d{idx}"
+    cached = _cache_get(_LEADERBOARD_CACHE, key)
+    if cached is not None:
+        return cached
+    value = DatabaseManager.get_decade_leaderboard_daily(year, month, idx)
+    return _cache_set(_LEADERBOARD_CACHE, key, value)
+
+def parse_fast_car_with_services(text: str) -> FastParseResult:
+    parts = [p.strip(" ,.;:!").lower() for p in text.split() if p.strip()]
     if not parts:
-        return None, []
+        return FastParseResult(car_number=None, services=[], error_message="Пустое сообщение.")
 
-    is_valid, normalized, _ = validate_car_number(parts[0])
+    is_valid, normalized, error_msg = validate_car_number(parts[0])
     if not is_valid:
-        return None, []
+        return FastParseResult(car_number=None, services=[], error_message=error_msg)
 
-    service_ids: list[int] = []
-    for token in parts[1:]:
+    services: list[FastServiceToken] = []
+    unknown_tokens: list[str] = []
+    for raw in parts[1:]:
+        token = raw
+        quantity = 1
+        half_price = token.endswith("?")
+        if half_price:
+            token = token[:-1]
+
+        mult_match = re.match(r"^([а-яa-z]+)(\d+)$", token)
+        if mult_match:
+            token = mult_match.group(1)
+            quantity = max(1, int(mult_match.group(2)))
+
+        matched_service_id = None
         for service_id, aliases in FAST_SERVICE_ALIASES.items():
             if token in aliases:
-                service_ids.append(service_id)
+                matched_service_id = service_id
                 break
-    return normalized, service_ids
+
+        if not matched_service_id:
+            unknown_tokens.append(raw)
+            continue
+
+        services.append(FastServiceToken(service_id=matched_service_id, quantity=quantity, half_price=half_price))
+
+    if not services:
+        err = "Не распознал ни одной услуги. Пример: B964AH797 пров запр2 запр?"
+        if unknown_tokens:
+            err += f"\nНеизвестные токены: {', '.join(unknown_tokens[:5])}"
+        return FastParseResult(car_number=normalized, services=[], error_message=err)
+
+    if unknown_tokens:
+        logger.info("fast parse ignored tokens: %s", ", ".join(unknown_tokens))
+    return FastParseResult(car_number=normalized, services=services)
+
+
+def ensure_db_user(telegram_user) -> dict | None:
+    db_user = DatabaseManager.get_user(int(telegram_user.id))
+    if db_user:
+        return db_user
+    name = " ".join(part for part in [telegram_user.first_name, telegram_user.last_name] if part) or telegram_user.username or "Пользователь"
+    DatabaseManager.register_user(int(telegram_user.id), name)
+    return DatabaseManager.get_user(int(telegram_user.id))
+
+
+async def handle_car_number_input(update: Update, context: CallbackContext, db_user: dict, text: str, force_reply: bool = False) -> bool:
+    try:
+        is_valid, normalized_number, _ = validate_car_number(text)
+        if not is_valid:
+            return False
+
+        active_shift = DatabaseManager.get_active_shift(db_user['id'])
+        if not active_shift:
+            if force_reply:
+                await update.message.reply_text("❌ Нет активной смены! Сначала откройте смену.")
+            return False
+
+        car_id = DatabaseManager.add_car(active_shift['id'], normalized_number)
+        context.user_data.pop('awaiting_car_number', None)
+        context.user_data['current_car'] = car_id
+
+        try:
+            markup = create_services_keyboard(car_id, 0, False, get_price_mode(context, db_user["id"]), db_user["id"])
+        except Exception:
+            logger.exception("create_services_keyboard failed for car_id=%s user_id=%s", car_id, db_user.get("id"))
+            await update.message.reply_text(
+                f"🚗 Машина {normalized_number} добавлена, но не удалось открыть список услуг. Откройте 'Текущая смена' и выберите машину."
+            )
+            return True
+
+        await update.message.reply_text(
+            f"🚗 Машина: {normalized_number}\n"
+            f"Выберите услуги:",
+            reply_markup=markup,
+        )
+        return True
+    except Exception:
+        logger.exception("handle_car_number_input failed user_id=%s text=%s", db_user.get("id"), text)
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте ещё раз.")
+        return True
 
 
 def get_mode_by_time(current_dt: datetime | None = None) -> str:
@@ -1650,6 +1775,10 @@ async def handle_message(update: Update, context: CallbackContext):
     user = update.effective_user
     text = (update.message.text or "").strip()
     db_user_for_access, blocked, subscription_active = resolve_user_access(user.id, context)
+    if not db_user_for_access:
+        db_user_for_access = ensure_db_user(user)
+        if db_user_for_access:
+            subscription_active = is_subscription_active(db_user_for_access)
     if blocked:
         await update.message.reply_text("⛔ Доступ к боту закрыт администратором.")
         return
@@ -1658,28 +1787,39 @@ async def handle_message(update: Update, context: CallbackContext):
     if db_user_for_access and subscription_active:
         active_shift = DatabaseManager.get_active_shift(db_user_for_access['id'])
         if active_shift:
-            fast_car_number, fast_services = parse_fast_car_with_services(text)
-            if fast_car_number and fast_services:
-                car_id = DatabaseManager.add_car(active_shift['id'], fast_car_number)
+            fast = parse_fast_car_with_services(text)
+            if fast.car_number and fast.services:
+                car_id = DatabaseManager.add_car(active_shift['id'], fast.car_number)
                 mode = get_price_mode(context, db_user_for_access["id"])
-                for service_id in fast_services:
-                    service = SERVICES.get(service_id)
+                total_qty = 0
+                for parsed in fast.services:
+                    service = SERVICES.get(parsed.service_id)
                     if not service:
                         continue
-                    DatabaseManager.add_service_to_car(
-                        car_id,
-                        service_id,
-                        plain_service_name(service['name']),
-                        get_current_price(service_id, mode),
-                    )
+                    base_price = get_current_price(parsed.service_id, mode)
+                    price = max(0, base_price // 2) if parsed.half_price else base_price
+                    for _ in range(parsed.quantity):
+                        DatabaseManager.add_service_to_car(
+                            car_id,
+                            parsed.service_id,
+                            plain_service_name(service['name']),
+                            price,
+                        )
+                        total_qty += 1
 
                 car = DatabaseManager.get_car(car_id)
                 await update.message.reply_text(
-                    f"🚗 Быстро добавлено: {fast_car_number}\n"
-                    f"Услуг: {len(fast_services)}\n"
+                    f"🚗 Быстро добавлено: {fast.car_number}\n"
+                    f"Услуг: {total_qty}\n"
                     f"Сумма: {format_money(int(car['total_amount']) if car else 0)}"
                 )
-                await send_goal_status(update, context, db_user_for_access['id'])
+                try:
+                    await send_goal_status(update, context, db_user_for_access['id'])
+                except Exception:
+                    logger.exception("send_goal_status failed in fast add for user_id=%s", db_user_for_access.get("id"))
+                return
+            if fast.car_number and not fast.services and len(text.split()) > 1:
+                await update.message.reply_text(f"❌ {fast.error_message}")
                 return
 
     if is_admin_telegram(user.id) and db_user_for_access:
@@ -1773,52 +1913,26 @@ async def handle_message(update: Update, context: CallbackContext):
         await update.message.reply_text("Ок, ввод номера отменён.")
         # Продолжаем обработку выбранного пункта меню
 
-    # Ожидание номера машины
+    # Ожидание номера машины (FSM-подсказка, но не обязательна)
     if context.user_data.get('awaiting_car_number'):
-        # Проверяем валидность номера
-        is_valid, normalized_number, error_msg = validate_car_number(text)
-        
-        if not is_valid:
-            await update.message.reply_text(
-                f"❌ Ошибка: {error_msg}\n\n"
-                f"Введите номер ещё раз:"
-            )
-            return
-        
-        # Получаем активную смену
-        db_user = DatabaseManager.get_user(user.id)
-        if not db_user:
+        if not db_user_for_access:
             await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
             context.user_data.pop('awaiting_car_number', None)
             return
-        active_shift = DatabaseManager.get_active_shift(db_user['id'])
-        
-        if not active_shift:
-            await update.message.reply_text(
-                "❌ Нет активной смены! Сначала откройте смену."
-            )
-            context.user_data.pop('awaiting_car_number', None)
-            await update.message.reply_text(
-        "Номер ТС можно указывать в любом формате:\n"
-        "Х340РУ797, х340ру или даже хру340.\n\n"
-        "Бот сам приведет номер к формату Х340РУ797, используя по умолчанию 797 регион"
-    )
+        if await handle_car_number_input(update, context, db_user_for_access, text):
             return
-        
-        # Добавляем машину
-        car_id = DatabaseManager.add_car(active_shift['id'], normalized_number)
-        
+        is_valid, _, error_msg = validate_car_number(text)
+        if not is_valid:
+            await update.message.reply_text(
+                f"❌ Ошибка: {error_msg}\n\nВведите номер ещё раз:"
+            )
+            return
         context.user_data.pop('awaiting_car_number', None)
-        context.user_data['current_car'] = car_id
-        
-        await update.message.reply_text(
-            f"🚗 Машина: {normalized_number}\n"
-            f"Выберите услуги:",
-            reply_markup=create_services_keyboard(car_id, 0, False, get_price_mode(context, db_user["id"]), db_user["id"])
-        )
+        await update.message.reply_text("❌ Нет активной смены! Сначала откройте смену.")
         return
 
     if context.user_data.get("awaiting_decade_goal"):
+
         raw_value = text.replace(" ", "").replace("₽", "")
         if not raw_value.isdigit():
             context.user_data.pop("awaiting_decade_goal", None)
@@ -2035,30 +2149,23 @@ async def handle_message(update: Update, context: CallbackContext):
             )
         return
     
-    if db_user_for_access:
-        active_shift = DatabaseManager.get_active_shift(db_user_for_access['id'])
-        if active_shift:
-            is_valid, normalized_number, _ = validate_car_number(text)
-            if is_valid:
-                car_id = DatabaseManager.add_car(active_shift['id'], normalized_number)
-                context.user_data['current_car'] = car_id
-                await update.message.reply_text(
-                    f"🚗 Машина: {normalized_number}\n"
-                    f"Выберите услуги:",
-                    reply_markup=create_services_keyboard(
-                        car_id,
-                        0,
-                        False,
-                        get_price_mode(context, db_user_for_access["id"]),
-                        db_user_for_access["id"],
-                    )
-                )
-                return
+    if db_user_for_access and await handle_car_number_input(update, context, db_user_for_access, text):
+        return
 
     await update.message.reply_text(
         "Используйте кнопки меню для работы с ботом.\n"
         "Напишите /start для начала."
     )
+
+
+
+async def safe_handle_message(update: Update, context: CallbackContext):
+    try:
+        await handle_message(update, context)
+    except Exception:
+        logger.exception("handle_message failed")
+        if update.effective_message:
+            await update.effective_message.reply_text("❌ Произошла ошибка. Попробуйте ещё раз.")
 
 # ========== ОБРАБОТЧИКИ КНОПОК ==========
 
@@ -2345,11 +2452,12 @@ async def current_shift(query, context):
     if not active_shift:
         text_message = build_decade_progress_dashboard(db_user['id'])
         image = None
-        try:
-            image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id']))
-        except Exception:
-            logger.exception("dashboard closed image render failed")
-        if image is not None and is_images_mode_enabled(db_user):
+        if is_images_mode_enabled(db_user):
+            try:
+                image = await build_dashboard_image_cached("closed", db_user["id"], _build_closed_dashboard_payload(db_user["id"]))
+            except Exception:
+                logger.exception("dashboard closed image render failed")
+        if image is not None:
             await context.bot.send_photo(
                 chat_id=query.message.chat_id,
                 photo=image,
@@ -2369,11 +2477,12 @@ async def current_shift(query, context):
     total = DatabaseManager.get_shift_total(active_shift['id'])
     message = build_current_shift_dashboard(db_user['id'], active_shift, cars, total)
     image = None
-    try:
-        image = build_dashboard_image_bytes_open(_build_open_dashboard_payload(db_user['id'], active_shift, cars, total))
-    except Exception:
-        logger.exception("dashboard open image render failed")
-    if image is not None and is_images_mode_enabled(db_user):
+    if is_images_mode_enabled(db_user):
+        try:
+            image = await build_dashboard_image_cached("open", db_user["id"], _build_open_dashboard_payload(db_user["id"], active_shift, cars, total))
+        except Exception:
+            logger.exception("dashboard open image render failed")
+    if image is not None:
         await context.bot.send_photo(chat_id=query.message.chat_id, photo=image, filename="dashboard.png", caption="📊 Дашборд")
         await query.edit_message_text("✅ Дашборд сформирован")
     else:
@@ -4334,11 +4443,12 @@ async def close_shift_confirm_yes(query, context, data):
     closed_shift = DatabaseManager.get_shift(shift_id) or shift
     message = build_closed_shift_dashboard(closed_shift, cars, total)
     image = None
-    try:
-        image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id'], closed_shift, cars, total))
-    except Exception:
-        logger.exception("dashboard closed image render failed")
-    if image is not None and is_images_mode_enabled(db_user):
+    if is_images_mode_enabled(db_user):
+        try:
+            image = await build_dashboard_image_cached("closed", db_user["id"], _build_closed_dashboard_payload(db_user["id"], closed_shift, cars, total))
+        except Exception:
+            logger.exception("dashboard closed image render failed")
+    if image is not None:
         await context.bot.send_photo(chat_id=query.message.chat_id, photo=image, filename="dashboard.png", caption="📊 Дашборд")
         await query.edit_message_text("✅ Смена закрыта. Дашборд отправлен.")
     else:
@@ -4445,9 +4555,7 @@ def build_leaderboard_text(decade_title: str, decade_leaders: list[dict]) -> str
     lines = []
     for place, leader in enumerate(decade_leaders, start=1):
         total = format_money(int(leader.get("total_amount", 0)))
-        shifts = int(leader.get("shifts_count", leader.get("shift_count", 0)) or 0)
-        avg_hour = int(leader.get("avg_per_hour") or 0)
-        lines.append(f"{place}. {leader.get('name', '—')} — {total} • {shifts} смен • {format_money(avg_hour)}/ч")
+        lines.append(f"{place}. {leader.get('name', '—')} — {total}")
     return "\n".join(header + ["", "Кто впереди — тот забирает декаду 👇", ""] + lines)
 
 
@@ -4764,6 +4872,18 @@ def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict],
     return out
 
 
+
+
+async def build_dashboard_image_cached(mode: str, user_id: int, payload: dict) -> BytesIO | None:
+    key = f"{mode}:{user_id}"
+    cached = _cache_get(_DASHBOARD_CACHE, key)
+    if cached is not None:
+        return cached
+    if mode == "open":
+        image = await asyncio.to_thread(build_dashboard_image_bytes_open, payload)
+    else:
+        image = await asyncio.to_thread(build_dashboard_image_bytes_closed, payload)
+    return _cache_set(_DASHBOARD_CACHE, key, image)
 def _build_dashboard_image(mode: str, payload: dict) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
         return None
@@ -4921,83 +5041,16 @@ def _build_leaderboard_image_fallback(decade_title: str, decade_leaders: list[di
 
 
 async def send_leaderboard_output(chat_target, context: CallbackContext, decade_title: str, decade_leaders: list[dict], reply_markup=None, highlight_name: str | None = None, requester_telegram_id: int | None = None):
+    del context, requester_telegram_id
     text_message = build_leaderboard_text(decade_title, decade_leaders)
-    if requester_telegram_id is None and getattr(chat_target, "from_user", None):
-        requester_telegram_id = int(chat_target.from_user.id)
-    db_user = DatabaseManager.get_user(requester_telegram_id) if requester_telegram_id else None
-    images_enabled = is_images_mode_enabled(db_user)
-    # live statuses
-    class _U:
-        callback_query = None
-        message = chat_target
-        effective_chat = chat_target.chat
-
-    fake_update = _U()
-    st = await send_status(fake_update, context, STATUS_LEADERBOARD[0])
-    await edit_status(st, STATUS_LEADERBOARD[1])
-
-    top3_avatars: dict[int, object] = {}
-    try:
-        tasks = []
-        for leader in decade_leaders:
-            uid = int(leader.get("telegram_id") or 0)
-            name = str(leader.get("name", ""))
-            tasks.append(get_avatar_image_async(context.bot, uid, 96, fallback_name=name))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for leader, res in zip(decade_leaders, results):
-            if not isinstance(res, Exception):
-                top3_avatars[int(leader.get("telegram_id") or 0)] = res
-    except Exception:
-        await edit_status(st, "⚠️ Не смог получить часть данных, показал то, что есть.")
-
-    image = None
-    if images_enabled:
-        await edit_status(st, STATUS_LEADERBOARD[2])
-        try:
-            image = build_leaderboard_image_bytes(decade_title, decade_leaders, highlight_name, top3_avatars=top3_avatars)
-        except Exception:
-            logger.exception("leaderboard image render failed")
-            image = None
-
-        if image is None:
-            image = _build_leaderboard_image_fallback(decade_title, decade_leaders)
-
-    if image is not None:
-        await done_status(
-            st,
-            STATUS_LEADERBOARD[3],
-            attach_photo_bytes=image,
-            filename="leaderboard.png",
-            caption=f"🏆 Топ героев\n📆 Декада: {decade_title}"[:1024],
-        )
-        rank_line = "Пока данных мало, но топ уже формируется."
-        if highlight_name and decade_leaders:
-            pos = next((i for i, row in enumerate(decade_leaders, start=1) if str(row.get("name", "")).strip().lower() == highlight_name.strip().lower()), None)
-            if pos:
-                rank_line = f"Твоя позиция: #{pos}"
-        await context.bot.send_message(chat_id=chat_target.chat_id, text=rank_line)
-        if isinstance(reply_markup, ReplyKeyboardMarkup):
-            await context.bot.send_message(
-                chat_id=chat_target.chat_id,
-                text="Выбери действие:",
-                reply_markup=reply_markup,
-            )
-        return
-
-    await send_text_with_optional_photo(
-        chat_target,
-        context,
-        text_message,
-        reply_markup=reply_markup,
-        section="leaderboard",
-    )
+    await chat_target.reply_text(text_message, reply_markup=reply_markup)
 
 
 async def leaderboard(query, context):
     """Топ героев: лидеры текущей декады"""
     today = now_local().date()
     idx, _, _, _, decade_title = get_decade_period(today)
-    decade_leaders = DatabaseManager.get_decade_leaderboard_daily(today.year, today.month, idx)
+    decade_leaders = await asyncio.to_thread(get_cached_decade_leaderboard, today.year, today.month, idx)
 
     db_user = DatabaseManager.get_user(query.from_user.id)
     has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
@@ -5141,11 +5194,12 @@ async def current_shift_message(update: Update, context: CallbackContext):
     if not active_shift:
         message = build_decade_progress_dashboard(db_user['id'])
         image = None
-        try:
-            image = build_dashboard_image_bytes_closed(_build_closed_dashboard_payload(db_user['id']))
-        except Exception:
-            logger.exception("dashboard closed image render failed")
-        if image is not None and is_images_mode_enabled(db_user):
+        if is_images_mode_enabled(db_user):
+            try:
+                image = await build_dashboard_image_cached("closed", db_user["id"], _build_closed_dashboard_payload(db_user["id"]))
+            except Exception:
+                logger.exception("dashboard closed image render failed")
+        if image is not None:
             await update.message.reply_photo(photo=image, filename="dashboard.png", caption="📊 Дашборд")
         else:
             await update.message.reply_text(
@@ -5161,11 +5215,12 @@ async def current_shift_message(update: Update, context: CallbackContext):
     total = DatabaseManager.get_shift_total(active_shift['id'])
     message = build_current_shift_dashboard(db_user['id'], active_shift, cars, total)
     image = None
-    try:
-        image = build_dashboard_image_bytes_open(_build_open_dashboard_payload(db_user['id'], active_shift, cars, total))
-    except Exception:
-        logger.exception("dashboard open image render failed")
-    if image is not None and is_images_mode_enabled(db_user):
+    if is_images_mode_enabled(db_user):
+        try:
+            image = await build_dashboard_image_cached("open", db_user["id"], _build_open_dashboard_payload(db_user["id"], active_shift, cars, total))
+        except Exception:
+            logger.exception("dashboard open image render failed")
+    if image is not None:
         await update.message.reply_photo(photo=image, filename="dashboard.png", caption="📊 Дашборд")
     else:
         await update.message.reply_text(
@@ -5210,7 +5265,7 @@ async def settings_message(update: Update, context: CallbackContext):
 async def leaderboard_message(update: Update, context: CallbackContext):
     today = now_local().date()
     idx, _, _, _, decade_title = get_decade_period(today)
-    decade_leaders = DatabaseManager.get_decade_leaderboard_daily(today.year, today.month, idx)
+    decade_leaders = await asyncio.to_thread(get_cached_decade_leaderboard, today.year, today.month, idx)
 
     db_user = DatabaseManager.get_user(update.effective_user.id)
     has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
@@ -5718,14 +5773,11 @@ async def delete_day_callback(query, context, data):
 
 async def error_handler(update: Update, context: CallbackContext):
     """Обработчик ошибок"""
-    logger.error(f"Ошибка: {context.error}", exc_info=context.error)
+    logger.exception("Unhandled bot error: %s", context.error)
     
     if update and update.effective_message:
         try:
-            await update.effective_message.reply_text(
-                "❌ Произошла ошибка.\n"
-                "Попробуйте ещё раз или перезапустите бота командой /start"
-            )
+            await update.effective_message.reply_text("❌ Произошла ошибка. Попробуйте ещё раз.")
         except Exception:
             pass
 
@@ -5789,7 +5841,7 @@ def main():
     
     # Обработчик медиа и текстовых сообщений
     application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & ~filters.COMMAND, handle_media_message))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, safe_handle_message))
     
     # Обработчик ошибок
     application.add_error_handler(error_handler)
