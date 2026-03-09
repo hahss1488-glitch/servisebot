@@ -5,7 +5,6 @@
 import logging
 import asyncio
 from datetime import datetime, date, timedelta
-from math import ceil
 from zoneinfo import ZoneInfo
 import json
 import os
@@ -41,10 +40,7 @@ from telegram.ext import (
 from config import BOT_TOKEN, SERVICES, validate_car_number
 from database import DatabaseManager, init_database, DB_PATH
 from exports import create_decade_pdf, create_decade_xlsx, create_month_xlsx
-from leaderboard.avatars import get_avatar_image as get_avatar_image_async
-from services.status import send_status, edit_status, done_status
 from services.planning import compute_plan_metrics
-from ui.texts import STATUS_LEADERBOARD
 from ui.nav import push_screen, pop_screen, get_current_screen, Screen
 from ui.premium_renderer import render_dashboard_image_bytes, render_leaderboard_image_bytes
 from ui.glass_ui import (
@@ -58,11 +54,9 @@ from ui.glass_ui import (
     draw_metric_box,
     draw_progress_bar,
     draw_rank_badge,
-    format_percent,
     format_money as format_money_glass,
     format_runrate,
     get_font,
-    get_type_font,
     truncate_text_to_width,
     fit_text_to_width,
 )
@@ -962,12 +956,10 @@ def build_current_shift_dashboard(user_id: int, shift: dict, cars: list[dict], t
         progress_bar = render_bar(today_percent, 10)
         runrate_to_need_today = (shift_income / shift_target) - 1
         runrate_line = f"⚡ Темп к цели смены: {runrate_to_need_today:+.0%}"
-        today_line = f"{format_money(shift_income)} / {format_money(shift_target)}"
     else:
         today_percent = 100
         progress_bar = render_bar(today_percent, 10)
         runrate_line = "⚡ Темп к цели смены: цель не задана"
-        today_line = f"{format_money(shift_income)} / —"
 
     if delta < 0:
         delta_line = f"Отставание на текущий день: -{format_money(abs(delta))}"
@@ -4609,7 +4601,7 @@ def draw_background(image, draw):
         t = y / max(height - 1, 1)
         if t <= 0.56:
             k = t / 0.56
-            c1, c2 = top, mid
+            c1, c2 = bg_top, bg_mid
         else:
             k = (t - 0.56) / 0.44
             c1, c2 = bg_mid, bg_bottom

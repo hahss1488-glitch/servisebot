@@ -1,8 +1,6 @@
 import logging
 import os
 import re
-from datetime import datetime
-from typing import Any
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
