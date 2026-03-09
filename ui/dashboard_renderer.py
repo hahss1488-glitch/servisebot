@@ -148,16 +148,6 @@ class DashboardRenderer:
         draw.rounded_rectangle((x, y, x + tw + 28, y + 36), radius=999, fill=(17, 27, 42, 230), outline=(255, 255, 255, 24), width=1)
         draw.text((x + 14, y + 7), text, fill=tone, font=self._font(20, True))
 
-    def draw_progress_bar(self, draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], progress: float | None, tone: tuple[int, int, int, int]) -> None:
-        x1, y1, x2, y2 = box
-        draw.rounded_rectangle(box, radius=999, fill=(8, 14, 24, 255), outline=(255, 255, 255, 20), width=1)
-        if progress is None:
-            return
-        pct = max(0.0, min(1.0, progress if progress <= 3 else progress / 100.0))
-        fw = int((x2 - x1 - 2) * pct)
-        if fw > 4:
-            draw.rounded_rectangle((x1 + 1, y1 + 1, x1 + fw, y2 - 1), radius=999, fill=tone)
-
     def fit_text(self, draw: ImageDraw.ImageDraw, text: str, max_width: int, max_size: int, min_size: int = 20, bold: bool = True) -> tuple[str, ImageFont.FreeTypeFont]:
         size = max_size
         while size >= min_size:
@@ -178,7 +168,13 @@ class DashboardRenderer:
     def draw_status_pill(self, draw: ImageDraw.ImageDraw, right_x: int, y: int, text: str, tone: tuple[int, int, int, int]) -> None:
         tw = draw.textbbox((0, 0), text, font=self._font(22, True))[2]
         x = right_x - tw - 34
-        draw.rounded_rectangle((x, y, right_x, y + 42), radius=999, fill=(16, 27, 42, 230), outline=(255, 255, 255, 22), width=1)
+        for i in range(42):
+            k = i / 41
+            r = int(16 * (1 - k) + tone[0] * 0.22 * k)
+            g = int(27 * (1 - k) + tone[1] * 0.22 * k)
+            b = int(42 * (1 - k) + tone[2] * 0.22 * k)
+            draw.line((x + 1, y + i, right_x - 1, y + i), fill=(r, g, b, 238))
+        draw.rounded_rectangle((x, y, right_x, y + 42), radius=999, outline=(255, 255, 255, 28), width=1)
         draw.text((x + 16, y + 10), text, fill=tone, font=self._font(22, True))
 
     def _resolve_avatar(self, row: LeaderRow, size: int) -> Image.Image:
@@ -248,18 +244,49 @@ class DashboardRenderer:
         self.draw_glass_card(img, box, radius=26)
         d = ImageDraw.Draw(img)
         d.text((x1 + 26, y1 + 24), block.title, fill=self.COLORS["white"], font=self._font(34, True))
+        self.draw_glow(img, (x2 - 180, y1 + 44), (240, 80), glow, blur=24, alpha=30)
         self.draw_status_pill(d, x2 - 26, y1 + 22, block.badge, self._status_tone(block.badge))
 
         money_text = self.format_money(block.revenue)
-        d.text((x1 + 26, y1 + 86), money_text, fill=self.COLORS["white"], font=self._font(76, True))
+        money_font = self._font(52, True)
+        money_w = d.textbbox((0, 0), money_text, font=money_font)[2]
+        money_x = x1 + ((x2 - x1 - money_w) // 2)
+        self.draw_glow(img, ((x1 + x2) // 2, y1 + 142), (520, 130), glow, blur=36, alpha=52)
+        d.text((money_x, y1 + 102), money_text, fill=self.COLORS["white"], font=money_font)
 
-        d.text((x1 + 26, y1 + 178), f"цель: {self.format_money(block.target)}", fill=self.COLORS["secondary"], font=self._font(28))
-        d.text((x1 + 26, y1 + 216), f"осталось: {self.format_money(max(0, block.remaining))}", fill=self.COLORS["secondary"], font=self._font(28))
-        self.draw_progress_bar(d, (x1 + 26, y1 + 258, x2 - 26, y1 + 278), block.run_rate, self._status_tone(block.badge))
+        secondary_font = self._font(20)
+        left_secondary = f"Цель: {self.format_money(block.target)}"
+        right_secondary = f"Осталось: {self.format_money(max(0, block.remaining))}"
+        d.text((x1 + 26, y1 + 188), left_secondary, fill=self.COLORS["secondary"], font=secondary_font)
+        right_w = d.textbbox((0, 0), right_secondary, font=secondary_font)[2]
+        d.text((x2 - 26 - right_w, y1 + 188), right_secondary, fill=self.COLORS["secondary"], font=secondary_font)
+
+        progress_box = (x1 + 26, y1 + 228, x2 - 26, y1 + 252)
+        self.draw_glow(img, ((x1 + x2) // 2, y1 + 240), (600, 44), glow, blur=26, alpha=30)
+        self.draw_progress_bar(d, progress_box, block.run_rate, self._status_tone(block.badge))
 
         stats = " • ".join(f"{m.value} {m.label}" for m in block.metrics[:2] if m.value)
         if stats:
-            d.text((x1 + 26, y1 + 296), stats, fill=self.COLORS["muted"], font=self._font(26))
+            stats_w = d.textbbox((0, 0), stats, font=self._font(16))[2]
+            d.text((x1 + ((x2 - x1 - stats_w) // 2), y1 + 276), stats, fill=self.COLORS["muted"], font=self._font(16))
+
+    def draw_progress_bar(self, draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], progress: float | None, tone: tuple[int, int, int, int]) -> None:
+        x1, y1, x2, y2 = box
+        draw.rounded_rectangle(box, radius=999, fill=(8, 14, 24, 255), outline=(255, 255, 255, 22), width=1)
+        if progress is None:
+            return
+        pct = max(0.0, min(1.0, progress if progress <= 3 else progress / 100.0))
+        fw = int((x2 - x1 - 4) * pct)
+        if fw < 6:
+            return
+        fx2 = x1 + 2 + fw
+        for i in range(max(1, fx2 - (x1 + 2))):
+            k = i / max(1, fx2 - (x1 + 2) - 1)
+            r = int(70 * (1 - k) + tone[0] * k)
+            g = int(130 * (1 - k) + tone[1] * k)
+            b = int(220 * (1 - k) + tone[2] * k)
+            draw.line((x1 + 2 + i, y1 + 2, x1 + 2 + i, y2 - 2), fill=(r, g, b, 255))
+        draw.rounded_rectangle((x1 + 2, y1 + 2, fx2, y2 - 2), radius=999, outline=(255, 255, 255, 34), width=1)
 
     def render_main_dashboard(self, data: MainDashboardData) -> Image.Image:
         img = Image.new("RGBA", (self.width, self.height), self.COLORS["bg"])
