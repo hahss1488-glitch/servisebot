@@ -73,8 +73,8 @@ logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 )
 logger = logging.getLogger(__name__)
-APP_VERSION = "2026.02.19-hotfix-23"
-APP_UPDATED_AT = "19.02.2026 13:40 (МСК)"
+APP_VERSION = "2026.03.09-hotfix-24"
+APP_UPDATED_AT = "09.03.2026 07:40 (МСК)"
 APP_TIMEZONE = "Europe/Moscow"
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
 ADMIN_TELEGRAM_IDS = {8379101989}
@@ -1817,9 +1817,6 @@ async def handle_message(update: Update, context: CallbackContext):
                     await send_goal_status(update, context, db_user_for_access['id'])
                 except Exception:
                     logger.exception("send_goal_status failed in fast add for user_id=%s", db_user_for_access.get("id"))
-                return
-            if fast.car_number and not fast.services and len(text.split()) > 1:
-                await update.message.reply_text(f"❌ {fast.error_message}")
                 return
             if fast.car_number and not fast.services and len(text.split()) > 1:
                 await update.message.reply_text(f"❌ {fast.error_message}")
