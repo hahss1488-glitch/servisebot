@@ -42,24 +42,7 @@ from database import DatabaseManager, init_database, DB_PATH
 from exports import create_decade_pdf, create_decade_xlsx, create_month_xlsx
 from services.planning import compute_plan_metrics
 from ui.nav import push_screen, pop_screen, get_current_screen, Screen
-from ui.premium_renderer import render_dashboard_image_bytes, render_leaderboard_image_bytes
-from ui.glass_ui import (
-    TOKENS,
-    create_aurora_background,
-    draw_summary_footer,
-    draw_avatar_circle,
-    draw_divider_glow,
-    draw_glass_card,
-    draw_glass_pill,
-    draw_metric_box,
-    draw_progress_bar,
-    draw_rank_badge,
-    format_money as format_money_glass,
-    format_runrate,
-    get_font,
-    truncate_text_to_width,
-    fit_text_to_width,
-)
+from ui.premium_renderer import TOKENS, format_money as format_money_glass, render_dashboard_image_bytes, render_leaderboard_image_bytes
 
 # Настройка логирования
 logging.basicConfig(
@@ -725,8 +708,13 @@ TOOLS_COMBO = "🧩 Комбо"
 TOOLS_DECADE_GOAL = "🎯 Цель декады"
 TOOLS_RESET = "🗑️ Сброс всех данных"
 TOOLS_ADMIN = "🛡️ Админ панель"
-TOOLS_TOGGLE_IMAGES = "🖼 Убрать картинки"
+TOOLS_TOGGLE_IMAGES_OFF = "🖼 Убрать картинки"
+TOOLS_TOGGLE_IMAGES_ON = "🖼 Включить картинки"
 TOOLS_BACK = "🔙 Назад"
+
+
+def tools_toggle_images_label(images_enabled: bool) -> str:
+    return TOOLS_TOGGLE_IMAGES_OFF if images_enabled else TOOLS_TOGGLE_IMAGES_ON
 
 
 def create_main_reply_keyboard(has_active_shift: bool = False, subscription_active: bool = True, shift_paused: bool = False) -> ReplyKeyboardMarkup:
@@ -761,12 +749,12 @@ def create_main_reply_keyboard(has_active_shift: bool = False, subscription_acti
     )
 
 
-def create_tools_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
+def create_tools_reply_keyboard(is_admin: bool = False, images_enabled: bool = True) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(TOOLS_PRICE), KeyboardButton(TOOLS_CALENDAR)],
         [KeyboardButton(TOOLS_HISTORY), KeyboardButton(TOOLS_COMBO)],
         [KeyboardButton(TOOLS_DECADE_GOAL), KeyboardButton(TOOLS_RESET)],
-        [KeyboardButton(TOOLS_TOGGLE_IMAGES)],
+        [KeyboardButton(tools_toggle_images_label(images_enabled))],
     ]
     if is_admin:
         keyboard.append([KeyboardButton(TOOLS_ADMIN)])
@@ -1689,7 +1677,7 @@ async def tools_hub_message(update: Update, context: CallbackContext):
     push_screen(context, Screen(name="tools_menu", kind="reply"))
     await update.message.reply_text(
         "🧰 Инструменты\nВыбери нужный раздел.",
-        reply_markup=create_tools_reply_keyboard(is_admin=is_admin_telegram(update.effective_user.id)),
+        reply_markup=create_tools_reply_keyboard(is_admin=is_admin_telegram(update.effective_user.id), images_enabled=is_images_mode_enabled(DatabaseManager.get_user(update.effective_user.id))),
     )
 
 
@@ -2035,7 +2023,8 @@ async def handle_message(update: Update, context: CallbackContext):
         TOOLS_DECADE_GOAL,
         TOOLS_RESET,
         TOOLS_ADMIN,
-        TOOLS_TOGGLE_IMAGES,
+        TOOLS_TOGGLE_IMAGES_OFF,
+        TOOLS_TOGGLE_IMAGES_ON,
         TOOLS_BACK,
     }:
         db_user = DatabaseManager.get_user(user.id)
@@ -2068,7 +2057,7 @@ async def handle_message(update: Update, context: CallbackContext):
         if text == TOOLS_RESET:
             await update.message.reply_text("Подтверди сброс:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ Сброс всех данных", callback_data="reset_data")]]))
             return
-        if text == TOOLS_TOGGLE_IMAGES:
+        if text in {TOOLS_TOGGLE_IMAGES_OFF, TOOLS_TOGGLE_IMAGES_ON}:
             await toggle_images_mode_message(update, context)
             return
         if text == TOOLS_ADMIN and is_admin_telegram(user.id):
@@ -4551,319 +4540,10 @@ def build_leaderboard_text(decade_title: str, decade_leaders: list[dict]) -> str
     return "\n".join(header + ["", "Кто впереди — тот забирает декаду 👇", ""] + lines)
 
 
-def _load_rank_font(image_font, size: int):
-    for path in (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ):
-        try:
-            return image_font.truetype(path, size=size)
-        except Exception:
-            continue
-    return image_font.load_default()
-
-
-def _initials(name: str) -> str:
-    parts = [p for p in str(name or "").replace("_", " ").split() if p]
-    if not parts:
-        return "?"
-    if len(parts) == 1:
-        return parts[0][:2].upper()
-    return (parts[0][0] + parts[1][0]).upper()
-
-
-def _truncate_to_width(draw, text: str, font, max_w: int) -> str:
-    value = (text or "—").strip() or "—"
-    if draw.textbbox((0, 0), value, font=font)[2] <= max_w:
-        return value
-    tail = "…"
-    for i in range(len(value), 0, -1):
-        candidate = value[:i].rstrip() + tail
-        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_w:
-            return candidate
-    return tail
-
-
-def _hex_rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
-    h = hex_color.lstrip("#")
-    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), alpha)
-
-
-def draw_background(image, draw):
-    from PIL import Image, ImageDraw, ImageFilter
-
-    width, height = image.size
-    bg_top = _hex_rgba("#2A0003")
-    bg_mid = _hex_rgba("#5A000A")
-    bg_bottom = _hex_rgba("#1A0002")
-
-    for y in range(height):
-        t = y / max(height - 1, 1)
-        if t <= 0.56:
-            k = t / 0.56
-            c1, c2 = bg_top, bg_mid
-        else:
-            k = (t - 0.56) / 0.44
-            c1, c2 = bg_mid, bg_bottom
-        col = tuple(int(c1[i] + (c2[i] - c1[i]) * k) for i in range(3)) + (255,)
-        draw.line((0, y, width, y), fill=col)
-
-    diag = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    dd = ImageDraw.Draw(diag, "RGBA")
-    diag_colors = [
-        _hex_rgba("#7A000D", 38),
-        _hex_rgba("#4A0008", 30),
-        _hex_rgba("#300004", 46),
-    ]
-    for i, x0 in enumerate((-560, -190, 190, 560, 940)):
-        c = diag_colors[i % len(diag_colors)]
-        dd.polygon([(x0, 0), (x0 + 240, 0), (x0 + height + 240, height), (x0 + height, height)], fill=c)
-    image.alpha_composite(diag)
-
-    central = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    cd = ImageDraw.Draw(central, "RGBA")
-    cd.ellipse((width // 2 - 760, height // 2 - 420, width // 2 + 760, height // 2 + 420), fill=_hex_rgba("#FFB347", 46))
-    central = central.filter(ImageFilter.GaussianBlur(140))
-    image.alpha_composite(central)
-
-    reds = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    rd = ImageDraw.Draw(reds, "RGBA")
-    rd.ellipse((80, 90, 780, 580), fill=_hex_rgba("#B31217", 34))
-    rd.ellipse((880, 120, 1560, 620), fill=_hex_rgba("#B31217", 32))
-    rd.ellipse((420, height - 420, 1220, height + 40), fill=_hex_rgba("#B31217", 38))
-    reds = reds.filter(ImageFilter.GaussianBlur(120))
-    image.alpha_composite(reds)
-
-    flares = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    fd = ImageDraw.Draw(flares, "RGBA")
-    for y in (220, 390, 560):
-        fd.rounded_rectangle((width // 2 - 320, y, width // 2 + 320, y + 3), radius=2, fill=_hex_rgba("#FFB347", 70))
-    flares = flares.filter(ImageFilter.GaussianBlur(8))
-    image.alpha_composite(flares)
-
-    particles = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    pd = ImageDraw.Draw(particles, "RGBA")
-    rng = random.Random(2403)
-    for _ in range(max(200, (width * height) // 12000)):
-        x = rng.randint(0, width - 1)
-        y = rng.randint(0, height - 1)
-        r = rng.randint(2, 4)
-        clr = _hex_rgba("#FFD98A", rng.randint(38, 62)) if rng.random() < 0.6 else _hex_rgba("#FFB347", rng.randint(40, 64))
-        pd.ellipse((x - r, y - r, x + r, y + r), fill=clr)
-    image.alpha_composite(particles)
-
-
-def draw_runrate(image, draw, x: int, y: int, w: int, ratio: float | None):
-    from PIL import Image, ImageDraw, ImageFilter
-
-    h = 16
-    r = 8
-    track = _hex_rgba("#2A120E", 210)
-    border = _hex_rgba("#FFD98A", 64)
-    draw.rounded_rectangle((x, y, x + w, y + h), radius=r, fill=track, outline=border, width=1)
-
-    half = w // 2
-    grad = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(grad, "RGBA")
-
-    left_a = _hex_rgba("#8E1B1B", 220)
-    left_b = _hex_rgba("#C93A2F", 230)
-    for i in range(half):
-        t = i / max(half - 1, 1)
-        c = tuple(int(left_a[j] + (left_b[j] - left_a[j]) * t) for j in range(4))
-        gd.line((i, 0, i, h), fill=c)
-
-    right_a = _hex_rgba("#3BAA57", 220)
-    right_b = _hex_rgba("#6AE08B", 230)
-    for i in range(half, w):
-        t = (i - half) / max(w - half - 1, 1)
-        c = tuple(int(right_a[j] + (right_b[j] - right_a[j]) * t) for j in range(4))
-        gd.line((i, 0, i, h), fill=c)
-
-    mask = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w, h), radius=r, fill=255)
-    image.paste(grad, (x, y), mask)
-
-    cx = x + half
-    draw.rounded_rectangle((cx - 1, y - 3, cx + 2, y + h + 3), radius=2, fill=_hex_rgba("#E7B35A", 235))
-
-    if ratio is None:
-        return
-
-    rr = max(0.0, min(2.0, float(ratio)))
-    marker_x = int(x + (rr / 2.0) * w)
-    mk_color = _hex_rgba("#D38D4A", 240) if rr < 1.0 else _hex_rgba("#6AE08B", 245)
-    glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    gdraw = ImageDraw.Draw(glow, "RGBA")
-    gdraw.ellipse((marker_x - 9, y - 1, marker_x + 9, y + h + 1), fill=(mk_color[0], mk_color[1], mk_color[2], 110))
-    glow = glow.filter(ImageFilter.GaussianBlur(6))
-    image.alpha_composite(glow)
-    draw.ellipse((marker_x - 7, y + 1, marker_x + 7, y + h - 1), fill=mk_color, outline=_hex_rgba("#FFD98A", 220), width=1)
-
-
-def _safe_int(value, default: int = 0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
-def _safe_float(value):
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
-def _fit_name_lines(draw, text: str, max_w: int, max_lines: int, base_size: int, min_size: int = 24):
-    words = (text or "—").strip().split()
-    if not words:
-        words = ["—"]
-    for size in range(base_size, min_size - 1, -2):
-        font = get_font(size, bold=True)
-        lines: list[str] = []
-        current = ""
-        i = 0
-        while i < len(words):
-            candidate = f"{current} {words[i]}".strip()
-            if draw.textbbox((0, 0), candidate, font=font)[2] <= max_w:
-                current = candidate
-                i += 1
-                continue
-            if not current:
-                current = truncate_text_to_width(draw, words[i], font, max_w)
-                i += 1
-            lines.append(current)
-            current = ""
-            if len(lines) == max_lines:
-                break
-        if current and len(lines) < max_lines:
-            lines.append(current)
-        if i < len(words) and lines:
-            lines[-1] = truncate_text_to_width(draw, lines[-1] + " " + " ".join(words[i:]), font, max_w)
-        if len(lines) <= max_lines:
-            line_h = draw.textbbox((0, 0), "Ag", font=font)[3]
-            return lines[:max_lines], font, line_h
-    font = get_font(min_size, bold=True)
-    line = truncate_text_to_width(draw, text or "—", font, max_w)
-    line_h = draw.textbbox((0, 0), "Ag", font=font)[3]
-    return [line], font, line_h
-
-
 def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
     if importlib.util.find_spec("PIL") is None:
         return None
     return render_leaderboard_image_bytes(decade_title, decade_leaders, highlight_name=highlight_name, top3_avatars=top3_avatars, updated_at=now_local())
-
-    from PIL import ImageDraw
-
-    width, height = 1600, 900
-    margin = 56
-    bg = create_aurora_background(width, height, seed=120)
-    canvas = bg.copy()
-    draw = ImageDraw.Draw(canvas, "RGBA")
-
-    header = (margin, 52, width - margin, 190)
-    draw_glass_card(canvas, bg, header, radius=32, material_level="hero", glow_color=(104, 212, 255), glow_strength=78)
-    hx1, hy1, hx2, hy2 = header
-    draw.text((hx1 + 34, hy1 + 20), "ЛИДЕРБОРД", fill=TOKENS["TEXT_PRIMARY"], font=get_font(58, True))
-    subtitle, subtitle_font = fit_text_to_width(decade_title or "1-я декада", None, 34, 22, 840, ellipsis=True, bold=True)
-    draw.text((hx1 + 34, hy1 + 84), subtitle, fill=TOKENS["TEXT_SECONDARY"], font=subtitle_font)
-    draw_glass_pill(canvas, bg, (hx2 - 290, hy1 + 42, hx2 - 34, hy1 + 92), "Top Heroes", get_font(24, True), TOKENS["TEXT_PRIMARY"])
-    draw_divider_glow(canvas, hx1 + 34, hx1 + 470, hy2 - 18)
-
-    top_y = hy2 + 34
-    top_cards = {
-        2: (margin, top_y + 56, margin + 430, top_y + 341, 96),
-        1: (margin + 414, top_y, margin + 1074, top_y + 340, 116),
-        3: (width - margin - 430, top_y + 56, width - margin, top_y + 341, 96),
-    }
-    leaders = {i + 1: row for i, row in enumerate(decade_leaders[:3])}
-    avatars = top3_avatars or {}
-
-    for place in (2, 1, 3):
-        row = leaders.get(place)
-        if not row:
-            continue
-        x1, y1, x2, y2, av_size = top_cards[place]
-        draw_glass_card(canvas, bg, (x1, y1, x2, y2), radius=34 if place == 1 else 28, material_level="hero" if place == 1 else "primary", border_bright=(place == 1), glow_color=(118, 137, 255) if place == 1 else (95, 186, 255), glow_strength=84 if place == 1 else 42)
-        draw_rank_badge(canvas, bg, (x1 + 20, y1 + 18, x1 + 104, y1 + 58), place)
-
-        avatar = avatars.get(_safe_int(row.get("telegram_id")))
-        av_x = x1 + ((x2 - x1) - av_size) // 2
-        av_y = y1 + (56 if place == 1 else 48)
-        draw_avatar_circle(canvas, (av_x, av_y, av_x + av_size, av_y + av_size), avatar, str(row.get("name", "—")))
-
-        name_y = av_y + av_size + 18
-        name_w = (x2 - x1) - 50
-        name, name_font = fit_text_to_width(str(row.get("name", "—")), None, 40 if place == 1 else 31, 22, name_w, ellipsis=True, bold=True)
-        nb = draw.textbbox((0, 0), name, font=name_font)
-        draw.text((x1 + ((x2 - x1) - (nb[2] - nb[0])) / 2, name_y), name, fill=TOKENS["TEXT_PRIMARY"], font=name_font)
-
-        amount = format_money_glass(_safe_int(row.get("total_amount")))
-        amount_font = get_font(56 if place == 1 else 42, True)
-        ab = draw.textbbox((0, 0), amount, font=amount_font)
-        amount_y = name_y + (nb[3] - nb[1]) + 14
-        draw.text((x1 + ((x2 - x1) - (ab[2] - ab[0])) / 2, amount_y), amount, fill=TOKENS["TEXT_PRIMARY"], font=amount_font)
-
-        avg_raw = _safe_float(row.get("total_hours"))
-        avg = f"{_safe_int(row.get('avg_per_hour'))} ₽/ч" if avg_raw and avg_raw > 0 else "—"
-        rr_text, rr_color = format_runrate(_safe_float(row.get("run_rate")))
-        chips = [(f"Avg/ч {avg}", TOKENS["TEXT_SECONDARY"]), (f"Tempo {rr_text}", rr_color), (f"Смены {_safe_int(row.get('shifts_count'))}", TOKENS["TEXT_SECONDARY"])]
-        chips_y1, chips_y2 = y2 - 52, y2 - 18
-        gap = 10
-        chip_w = ((x2 - x1) - 38 - gap * 2) // 3
-        for i, (txt, color) in enumerate(chips):
-            px1 = x1 + 19 + i * (chip_w + gap)
-            pill_text, pill_font = fit_text_to_width(txt, None, 19 if place == 1 else 16, 14, chip_w - 12, ellipsis=True, bold=True)
-            draw_glass_pill(canvas, bg, (px1, chips_y1, px1 + chip_w, chips_y2), pill_text, pill_font, color)
-
-    rows = decade_leaders[3:]
-    row_h = 92
-    row_gap = 10
-    rows_top = top_y + 366
-    max_rows = max(0, (height - 56 - 54 - rows_top + row_gap) // (row_h + row_gap))
-    rows = rows[:max_rows]
-
-    for offset, row in enumerate(rows, start=4):
-        y1 = rows_top + (offset - 4) * (row_h + row_gap)
-        y2 = y1 + row_h
-        is_me = bool(highlight_name and str(row.get("name", "")).strip().lower() == str(highlight_name).strip().lower())
-        row_box = (margin, y1, width - margin, y2)
-        draw_glass_card(canvas, bg, row_box, radius=24, material_level="metric", border_bright=is_me, glow_color=(95, 212, 255) if is_me else None, glow_strength=42 if is_me else 0)
-        x1, _, x2, _ = row_box
-
-        draw_rank_badge(canvas, bg, (x1 + 14, y1 + 24, x1 + 92, y1 + 68), offset)
-        draw_avatar_circle(canvas, (x1 + 104, y1 + 20, x1 + 156, y1 + 72), None, str(row.get("name", "—")))
-        name, name_font = fit_text_to_width(str(row.get("name", "—")), None, 30, 20, 300, ellipsis=True, bold=True)
-        draw.text((x1 + 170, y1 + 30), name, fill=TOKENS["TEXT_PRIMARY"], font=name_font)
-
-        avg_raw = _safe_float(row.get("total_hours"))
-        avg_txt = f"{_safe_int(row.get('avg_per_hour'))} ₽/ч" if avg_raw and avg_raw > 0 else "—"
-        draw.text((x1 + 500, y1 + 34), avg_txt, fill=TOKENS["TEXT_SECONDARY"], font=get_font(24, False))
-
-        rr_text, rr_color = format_runrate(_safe_float(row.get("run_rate")))
-        draw.text((x1 + 680, y1 + 34), f"Tempo {rr_text if rr_text else '—'}", fill=rr_color, font=get_font(24, True))
-
-        shifts_txt = str(_safe_int(row.get("shifts_count")))
-        draw.text((x1 + 900, y1 + 34), f"Смены {shifts_txt}", fill=TOKENS["TEXT_MUTED"], font=get_font(23, False))
-
-        total = format_money_glass(_safe_int(row.get("total_amount")))
-        total_font = get_font(34, True)
-        tb = draw.textbbox((0, 0), total, font=total_font)
-        draw.text((x2 - 24 - (tb[2] - tb[0]), y1 + 28), total, fill=TOKENS["TEXT_PRIMARY"], font=total_font)
-
-    footer_y = height - 56
-    total_amount = sum(_safe_int(r.get("total_amount")) for r in decade_leaders)
-    draw_summary_footer(canvas, bg, (margin, footer_y, width - margin, footer_y + 44), [f"Участников: {len(decade_leaders)}", f"Общий объём: {format_money_glass(total_amount)}", "Обновлено сегодня"])
-
-    out = BytesIO()
-    out.name = "leaderboard.png"
-    canvas.convert("RGB").save(out, format="PNG")
-    out.seek(0)
-    return out
-
-
 
 
 async def build_dashboard_image_cached(mode: str, user_id: int, payload: dict) -> BytesIO | None:
@@ -4881,160 +4561,19 @@ def _build_dashboard_image(mode: str, payload: dict) -> BytesIO | None:
         return None
     return render_dashboard_image_bytes(mode, payload)
 
-    from PIL import ImageDraw
-
-    w, h = 1600, 900
-    bg = create_aurora_background(w, h, seed=333 if mode == "open" else 444)
-    canvas = bg.copy()
-    draw = ImageDraw.Draw(canvas, "RGBA")
-
-    header = (56, 52, 1544, 182)
-    draw_glass_card(canvas, bg, header, radius=32, material_level="hero", glow_color=(105, 210, 255), glow_strength=72)
-    hx1, hy1, hx2, _ = header
-    draw.text((hx1 + 34, hy1 + 18), "Дашборд", fill=TOKENS["TEXT_PRIMARY"], font=get_font(56, True))
-    subtitle, subtitle_font = fit_text_to_width(payload.get("decade_title", "—"), None, 28, 20, 930, ellipsis=True, bold=True)
-    draw.text((hx1 + 34, hy1 + 84), subtitle, fill=TOKENS["TEXT_SECONDARY"], font=subtitle_font)
-    status = "Смена активна" if mode == "open" else "Смена закрыта"
-    draw_glass_pill(canvas, bg, (hx2 - 300, hy1 + 38, hx2 - 34, hy1 + 90), status, get_font(23, True), TOKENS["TEXT_PRIMARY"])
-
-    if mode == "open":
-        _draw_open_dashboard(canvas, bg, payload)
-    else:
-        _draw_closed_dashboard(canvas, bg, payload)
-
-    out = BytesIO()
-    out.name = "dashboard.png"
-    canvas.convert("RGB").save(out, format="PNG")
-    out.seek(0)
-    return out
-
-
-def _draw_open_dashboard(canvas, bg, p: dict) -> None:
-    from PIL import ImageDraw
-
-    draw = ImageDraw.Draw(canvas, "RGBA")
-    panel = (56, 214, 1544, 644)
-    draw_glass_card(canvas, bg, panel, radius=34, material_level="primary", glow_color=(106, 186, 255), glow_strength=56)
-    x1, y1, x2, y2 = panel
-
-    draw.text((x1 + 34, y1 + 28), "Главный KPI", fill=TOKENS["TEXT_PRIMARY"], font=get_font(38, True))
-    period, period_font = fit_text_to_width(p.get("decade_title", "—"), None, 24, 18, 760, ellipsis=True)
-    draw.text((x1 + 34, y1 + 78), period, fill=TOKENS["TEXT_SECONDARY"], font=period_font)
-
-    amount = format_money_glass(p.get("decade_earned"))
-    draw.text((x1 + 34, y1 + 124), amount, fill=TOKENS["TEXT_PRIMARY"], font=get_font(86, True))
-    goal_text = f"из {format_money_glass(p.get('decade_goal')) if _safe_int(p.get('decade_goal')) > 0 else '—'}"
-    draw.text((x1 + 34, y1 + 228), goal_text, fill=TOKENS["TEXT_SECONDARY"], font=get_font(34, False))
-
-    completion = p.get("completion_percent")
-    completion_int = int(round((completion or 0) * 100)) if completion is not None else 0
-    bubble = (x2 - 330, y1 + 34, x2 - 34, y1 + 254)
-    draw_glass_card(canvas, bg, bubble, radius=30, material_level="hero", glow_color=(102, 236, 217), glow_strength=82, border_bright=True)
-    bx1, by1, bx2, by2 = bubble
-    pct_text = f"{completion_int}%" if completion is not None else "—"
-    pb = draw.textbbox((0, 0), pct_text, font=get_font(72, True))
-    draw.text((bx1 + (bx2 - bx1 - (pb[2] - pb[0])) / 2, by1 + 24), pct_text, fill=TOKENS["TEXT_PRIMARY"], font=get_font(72, True))
-    draw.text((bx1 + 34, by1 + 112), "Выполнение", fill=TOKENS["TEXT_SECONDARY"], font=get_font(28, True))
-    draw.text((bx1 + 34, by1 + 152), f"Темп: {p.get('pace_text', '—')}", fill=p.get("pace_color", TOKENS["TEXT_SECONDARY"]), font=get_font(24, True))
-    delta_color = TOKENS["POSITIVE"] if "+" in str(p.get("pace_delta_text", "")) else TOKENS["NEGATIVE"]
-    if "—" in str(p.get("pace_delta_text", "")):
-        delta_color = TOKENS["TEXT_SECONDARY"]
-    draw.text((bx1 + 34, by1 + 184), p.get("pace_delta_text", "—"), fill=delta_color, font=get_font(21, False))
-
-    draw_progress_bar(canvas, (x1 + 34, y1 + 292, x2 - 34, y1 + 318), completion)
-
-    metrics = p.get("decade_metrics", [])[:6]
-    card_h, gap = 104, 18
-    card_w = (x2 - x1 - 68 - gap * 2) // 3
-    for i, item in enumerate(metrics):
-        col, row = i % 3, i // 3
-        bx = x1 + 34 + col * (card_w + gap)
-        by = y1 + 336 + row * (card_h + gap)
-        draw_metric_box(canvas, bg, (bx, by, bx + card_w, by + card_h), item[0], item[1], item[2])
-
-    mini = p.get("mini") or []
-    parsed = []
-    for item in mini[:3]:
-        if ":" in str(item):
-            k, v = str(item).split(":", 1)
-            parsed.append((k.strip(), v.strip()))
-    while len(parsed) < 3:
-        parsed.append(("—", "—"))
-    py1, py2 = 676, 734
-    pw = (x2 - x1 - 68 - 24) // 3
-    for i, item in enumerate(parsed):
-        px1 = x1 + 34 + i * (pw + 12)
-        draw_glass_card(canvas, bg, (px1, py1, px1 + pw, py2), radius=20, material_level="metric")
-        key, key_font = fit_text_to_width(item[0], None, 22, 16, pw - 24, ellipsis=True)
-        val, val_font = fit_text_to_width(item[1], None, 26, 16, pw - 24, ellipsis=True, bold=True)
-        draw.text((px1 + 14, py1 + 10), key, fill=TOKENS["TEXT_MUTED"], font=key_font)
-        draw.text((px1 + 14, py1 + 30), val, fill=TOKENS["TEXT_SECONDARY"], font=val_font)
-
-
-def _draw_closed_dashboard(canvas, bg, p: dict) -> None:
-    _draw_open_dashboard(canvas, bg, {
-        "decade_title": p.get("decade_title"),
-        "decade_earned": p.get("earned"),
-        "decade_goal": p.get("goal"),
-        "completion_percent": p.get("completion_percent"),
-        "pace_text": p.get("pace_text"),
-        "pace_color": p.get("pace_color"),
-        "pace_delta_text": p.get("pace_delta_text"),
-        "decade_metrics": p.get("metrics") or [],
-        "mini": p.get("mini") or [],
-    })
-
-
-
-def build_dashboard_image_bytes_open(payload: dict) -> BytesIO | None:
-    return _build_dashboard_image("open", payload)
-
-
-def build_dashboard_image_bytes_closed(payload: dict) -> BytesIO | None:
-    return _build_dashboard_image("closed", payload)
-
-
-def _build_leaderboard_image_fallback(decade_title: str, decade_leaders: list[dict]) -> BytesIO | None:
-    if importlib.util.find_spec("PIL") is None:
-        return None
-    from PIL import Image, ImageDraw, ImageFont
-
-    width = 1400
-    row_h = 68
-    top = 120
-    height = top + max(1, len(decade_leaders)) * row_h + 60
-    img = Image.new("RGB", (width, height), "#2A0003")
-    draw = ImageDraw.Draw(img)
-
-    title_font = _load_rank_font(ImageFont, 58)
-    line_font = _load_rank_font(ImageFont, 36)
-    small_font = _load_rank_font(ImageFont, 28)
-
-    draw.text((70, 26), "ЛИДЕРБОРД", fill="#FFD98A", font=title_font)
-    draw.text((70, 82), decade_title, fill="#F5C76A", font=small_font)
-
-    y = top
-    for i, row in enumerate(decade_leaders, start=1):
-        draw.rectangle((60, y, width - 60, y + row_h - 8), outline="#D7A04A", width=2, fill="#300004")
-        name = str(row.get("name", "—"))
-        avg = "—" if float(row.get("total_hours") or 0) <= 0 else f"{int(row.get('avg_per_hour') or 0)} ₽"
-        total = format_money(int(row.get("total_amount") or 0))
-        draw.text((86, y + 12), f"#{i}", fill="#FFF1D2", font=line_font)
-        draw.text((190, y + 12), name, fill="#FFF1D2", font=line_font)
-        draw.text((820, y + 12), avg, fill="#F7D38C", font=line_font)
-        draw.text((1150, y + 12), total, fill="#FFD98A", font=line_font)
-        y += row_h
-
-    out = BytesIO()
-    out.name = "leaderboard.png"
-    img.save(out, format="PNG")
-    out.seek(0)
-    return out
-
 
 async def send_leaderboard_output(chat_target, context: CallbackContext, decade_title: str, decade_leaders: list[dict], reply_markup=None, highlight_name: str | None = None, requester_telegram_id: int | None = None):
-    del context, requester_telegram_id
     text_message = build_leaderboard_text(decade_title, decade_leaders)
+    db_user = DatabaseManager.get_user(requester_telegram_id) if requester_telegram_id else None
+    image = None
+    if is_images_mode_enabled(db_user):
+        try:
+            image = await asyncio.to_thread(build_leaderboard_image_bytes, decade_title, decade_leaders, highlight_name)
+        except Exception:
+            logger.exception("leaderboard image render failed")
+    if image is not None:
+        await chat_target.reply_photo(photo=image, filename="leaderboard.png", caption="🏆 Топ героев", reply_markup=reply_markup)
+        return
     await chat_target.reply_text(text_message, reply_markup=reply_markup)
 
 
@@ -5588,7 +5127,8 @@ async def toggle_images_mode(query, context):
 
     current = DatabaseManager.is_images_enabled(db_user["id"])
     DatabaseManager.set_images_enabled(db_user["id"], not current)
-    state = "выключены" if current else "включены"
+    new_enabled = not current
+    state = "включены" if new_enabled else "выключены"
     await query.edit_message_text(f"✅ Режим обновлён: картинки {state}.")
 
 
@@ -5600,8 +5140,15 @@ async def toggle_images_mode_message(update: Update, context: CallbackContext):
 
     current = DatabaseManager.is_images_enabled(db_user["id"])
     DatabaseManager.set_images_enabled(db_user["id"], not current)
-    state = "выключены" if current else "включены"
-    await update.message.reply_text(f"✅ Режим обновлён: картинки {state}.")
+    new_enabled = not current
+    state = "включены" if new_enabled else "выключены"
+    await update.message.reply_text(
+        f"✅ Режим обновлён: картинки {state}.",
+        reply_markup=create_tools_reply_keyboard(
+            is_admin=is_admin_telegram(update.effective_user.id),
+            images_enabled=new_enabled,
+        ),
+    )
 
 
 async def cleanup_data_menu(query, context):
