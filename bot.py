@@ -238,35 +238,40 @@ def ensure_db_user(telegram_user) -> dict | None:
 
 
 async def handle_car_number_input(update: Update, context: CallbackContext, db_user: dict, text: str, force_reply: bool = False) -> bool:
-    is_valid, normalized_number, _ = validate_car_number(text)
-    if not is_valid:
-        return False
-
-    active_shift = DatabaseManager.get_active_shift(db_user['id'])
-    if not active_shift:
-        if force_reply:
-            await update.message.reply_text("❌ Нет активной смены! Сначала откройте смену.")
-        return False
-
-    car_id = DatabaseManager.add_car(active_shift['id'], normalized_number)
-    context.user_data.pop('awaiting_car_number', None)
-    context.user_data['current_car'] = car_id
-
     try:
-        markup = create_services_keyboard(car_id, 0, False, get_price_mode(context, db_user["id"]), db_user["id"])
-    except Exception:
-        logger.exception("create_services_keyboard failed for car_id=%s user_id=%s", car_id, db_user.get("id"))
+        is_valid, normalized_number, _ = validate_car_number(text)
+        if not is_valid:
+            return False
+
+        active_shift = DatabaseManager.get_active_shift(db_user['id'])
+        if not active_shift:
+            if force_reply:
+                await update.message.reply_text("❌ Нет активной смены! Сначала откройте смену.")
+            return False
+
+        car_id = DatabaseManager.add_car(active_shift['id'], normalized_number)
+        context.user_data.pop('awaiting_car_number', None)
+        context.user_data['current_car'] = car_id
+
+        try:
+            markup = create_services_keyboard(car_id, 0, False, get_price_mode(context, db_user["id"]), db_user["id"])
+        except Exception:
+            logger.exception("create_services_keyboard failed for car_id=%s user_id=%s", car_id, db_user.get("id"))
+            await update.message.reply_text(
+                f"🚗 Машина {normalized_number} добавлена, но не удалось открыть список услуг. Откройте 'Текущая смена' и выберите машину."
+            )
+            return True
+
         await update.message.reply_text(
-            f"🚗 Машина {normalized_number} добавлена, но не удалось открыть список услуг. Откройте 'Текущая смена' и выберите машину."
+            f"🚗 Машина: {normalized_number}\n"
+            f"Выберите услуги:",
+            reply_markup=markup,
         )
         return True
-
-    await update.message.reply_text(
-        f"🚗 Машина: {normalized_number}\n"
-        f"Выберите услуги:",
-        reply_markup=markup,
-    )
-    return True
+    except Exception:
+        logger.exception("handle_car_number_input failed user_id=%s text=%s", db_user.get("id"), text)
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте ещё раз.")
+        return True
 
 
 def get_mode_by_time(current_dt: datetime | None = None) -> str:
@@ -1808,7 +1813,13 @@ async def handle_message(update: Update, context: CallbackContext):
                     f"Услуг: {total_qty}\n"
                     f"Сумма: {format_money(int(car['total_amount']) if car else 0)}"
                 )
-                await send_goal_status(update, context, db_user_for_access['id'])
+                try:
+                    await send_goal_status(update, context, db_user_for_access['id'])
+                except Exception:
+                    logger.exception("send_goal_status failed in fast add for user_id=%s", db_user_for_access.get("id"))
+                return
+            if fast.car_number and not fast.services and len(text.split()) > 1:
+                await update.message.reply_text(f"❌ {fast.error_message}")
                 return
             if fast.car_number and not fast.services and len(text.split()) > 1:
                 await update.message.reply_text(f"❌ {fast.error_message}")
