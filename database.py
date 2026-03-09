@@ -164,7 +164,13 @@ def init_database():
         cur.execute("ALTER TABLE user_settings ADD COLUMN broadcast_enabled INTEGER DEFAULT 1")
     if "images_enabled" not in settings_columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN images_enabled INTEGER DEFAULT 1")
-    
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_status_start ON shifts(user_id, status, start_time)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shifts_work_date_user ON shifts(work_date, user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cars_shift_id ON cars(shift_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_car_services_car_id ON car_services(car_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_user_settings_user_id ON user_settings(user_id)")
+
     conn.commit()
     conn.close()
     print("✅ База данных создана")
