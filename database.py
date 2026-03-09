@@ -164,6 +164,12 @@ def init_database():
         cur.execute("ALTER TABLE user_settings ADD COLUMN broadcast_enabled INTEGER DEFAULT 1")
     if "images_enabled" not in settings_columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN images_enabled INTEGER DEFAULT 1")
+    if "avatar_source" not in settings_columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN avatar_source TEXT DEFAULT 'telegram'")
+    if "custom_avatar_path" not in settings_columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN custom_avatar_path TEXT DEFAULT ''")
+    if "telegram_avatar_path" not in settings_columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN telegram_avatar_path TEXT DEFAULT ''")
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_status_start ON shifts(user_id, status, start_time)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shifts_work_date_user ON shifts(work_date, user_id)")
@@ -893,6 +899,63 @@ class DatabaseManager:
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET images_enabled = excluded.images_enabled""",
             (user_id, 1 if enabled else 0)
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_avatar_settings(user_id: int) -> Dict[str, str]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT avatar_source, custom_avatar_path, telegram_avatar_path FROM user_settings WHERE user_id = ?",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return {"avatar_source": "telegram", "custom_avatar_path": "", "telegram_avatar_path": ""}
+        return {
+            "avatar_source": str(row["avatar_source"] or "telegram"),
+            "custom_avatar_path": str(row["custom_avatar_path"] or ""),
+            "telegram_avatar_path": str(row["telegram_avatar_path"] or ""),
+        }
+
+    @staticmethod
+    def set_custom_avatar(user_id: int, path: str) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            f"""INSERT INTO user_settings (user_id, avatar_source, custom_avatar_path)
+            VALUES (?, 'custom', ?)
+            ON CONFLICT(user_id) DO UPDATE SET avatar_source = 'custom', custom_avatar_path = excluded.custom_avatar_path""",
+            (user_id, path or ""),
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def set_telegram_avatar_path(user_id: int, path: str) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            f"""INSERT INTO user_settings (user_id, telegram_avatar_path)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET telegram_avatar_path = excluded.telegram_avatar_path""",
+            (user_id, path or ""),
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def reset_avatar_source(user_id: int) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            f"""INSERT INTO user_settings (user_id, avatar_source)
+            VALUES (?, 'telegram')
+            ON CONFLICT(user_id) DO UPDATE SET avatar_source = 'telegram'""",
+            (user_id,),
         )
         conn.commit()
         conn.close()
