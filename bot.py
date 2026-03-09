@@ -19,6 +19,8 @@ import csv
 import shutil
 from dataclasses import dataclass
 
+from PIL import Image, UnidentifiedImageError
+
 from telegram import (
     Update,
     InlineKeyboardMarkup,
@@ -331,10 +333,15 @@ def resolve_user_avatar_path(user_id: int) -> str:
     source = settings.get("avatar_source", "telegram")
     custom = settings.get("custom_avatar_path", "")
     tg = settings.get("telegram_avatar_path", "")
-    if source == "custom" and custom and Path(custom).exists():
-        return custom
-    if tg and Path(tg).exists():
-        return tg
+    if source == "custom" and custom:
+        p = Path(custom)
+        if p.exists() and p.is_file() and p.stat().st_size > 32:
+            return custom
+        DatabaseManager.reset_avatar_source(user_id)
+    if tg:
+        tp = Path(tg)
+        if tp.exists() and tp.is_file() and tp.stat().st_size > 32:
+            return tg
     return ""
 
 
@@ -357,6 +364,71 @@ async def _refresh_telegram_avatar_cache(context: CallbackContext, telegram_id: 
     except Exception:
         logger.exception("telegram avatar refresh failed telegram_id=%s", telegram_id)
         return ""
+
+
+def _validate_image_bytes(payload: bytes) -> tuple[bool, str]:
+    if not payload or len(payload) < 64:
+        return False, "Файл пустой или повреждён."
+    if len(payload) > 10 * 1024 * 1024:
+        return False, "Файл слишком большой (максимум 10 МБ)."
+    try:
+        with Image.open(BytesIO(payload)) as img:
+            img.verify()
+        with Image.open(BytesIO(payload)) as img2:
+            w, h = img2.size
+            if w < 64 or h < 64:
+                return False, "Слишком маленькое изображение. Минимум 64×64."
+    except UnidentifiedImageError:
+        return False, "Не удалось распознать изображение."
+    except Exception:
+        return False, "Изображение повреждено."
+    return True, ""
+
+
+async def _consume_profile_avatar_upload(update: Update, context: CallbackContext, db_user: dict) -> bool:
+    if not context.user_data.get("awaiting_profile_avatar"):
+        return False
+
+    message = update.message
+    if not message:
+        return False
+
+    payload: bytes | None = None
+    if message.photo:
+        file = await context.bot.get_file(message.photo[-1].file_id)
+        payload = bytes(await file.download_as_bytearray())
+    elif message.document:
+        mime = str(message.document.mime_type or "")
+        if not mime.startswith("image/"):
+            await message.reply_text("Пришли изображение (фото или файл-картинку).")
+            return True
+        file = await context.bot.get_file(message.document.file_id)
+        payload = bytes(await file.download_as_bytearray())
+    else:
+        await message.reply_text("Пришли фото или файл-изображение. Для отмены нажми «♻️ Сбросить аватар».")
+        return True
+
+    ok, err = _validate_image_bytes(payload or b"")
+    if not ok:
+        await message.reply_text(f"❌ {err} Попробуй другое изображение.")
+        return True
+
+    try:
+        CUSTOM_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+        avatar_path = CUSTOM_AVATAR_DIR / f"{db_user['id']}.jpg"
+        with Image.open(BytesIO(payload)) as src:
+            image = src.convert("RGB")
+            image.thumbnail((768, 768), Image.Resampling.LANCZOS)
+            canvas = Image.new("RGB", image.size, "#101826")
+            canvas.paste(image, (0, 0))
+            canvas.save(avatar_path, format="JPEG", quality=90, optimize=True)
+        DatabaseManager.set_custom_avatar(db_user["id"], str(avatar_path))
+        context.user_data.pop("awaiting_profile_avatar", None)
+        await message.reply_text("✅ Кастомный аватар сохранён и применён.")
+    except Exception:
+        logger.exception("avatar upload failed user_id=%s", db_user.get("id"))
+        await message.reply_text("❌ Не удалось сохранить аватар. Попробуй ещё раз.")
+    return True
 
 
 def get_decade_period(target: date | None = None):
@@ -1790,19 +1862,7 @@ async def handle_media_message(update: Update, context: CallbackContext):
             await update.message.reply_text("✅ Видео FAQ обновлено. Пользователи будут получать его как полноценное видео.")
             return
 
-    if db_user_for_access and context.user_data.get("awaiting_profile_avatar"):
-        photo = update.message.photo[-1] if update.message.photo else None
-        if not photo:
-            await update.message.reply_text("Пришли именно фото, чтобы установить аватар.")
-            return
-        CUSTOM_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
-        file = await context.bot.get_file(photo.file_id)
-        avatar_path = CUSTOM_AVATAR_DIR / f"{db_user_for_access['id']}.jpg"
-        data = await file.download_as_bytearray()
-        avatar_path.write_bytes(bytes(data))
-        DatabaseManager.set_custom_avatar(db_user_for_access["id"], str(avatar_path))
-        context.user_data.pop("awaiting_profile_avatar", None)
-        await update.message.reply_text("✅ Кастомный аватар сохранён.")
+    if db_user_for_access and await _consume_profile_avatar_upload(update, context, db_user_for_access):
         return
 
 
@@ -3342,7 +3402,10 @@ async def profile_change_name_callback(query, context):
 
 async def profile_avatar_upload_callback(query, context):
     context.user_data["awaiting_profile_avatar"] = True
-    await query.edit_message_text("Отправь фото одним сообщением — сохраним как кастомный аватар.")
+    await query.edit_message_text(
+        "Отправь фото или файл-картинку одним сообщением — сохраним как кастомный аватар.\n"
+        "Поддерживаются JPG/PNG/WebP до 10 МБ."
+    )
 
 
 async def profile_avatar_reset_callback(query, context):
@@ -3351,6 +3414,7 @@ async def profile_avatar_reset_callback(query, context):
         await query.edit_message_text("❌ Пользователь не найден")
         return
     DatabaseManager.reset_avatar_source(db_user["id"])
+    context.user_data.pop("awaiting_profile_avatar", None)
     text = build_profile_text(db_user, query.from_user.id)
     kb = build_profile_keyboard(db_user, query.from_user.id)
     await query.edit_message_text(text, reply_markup=kb)
@@ -5477,7 +5541,7 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_callback))
     
     # Обработчик медиа и текстовых сообщений
-    application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & ~filters.COMMAND, handle_media_message))
+    application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO | filters.Document.IMAGE) & ~filters.COMMAND, handle_media_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, safe_handle_message))
     
     # Обработчик ошибок

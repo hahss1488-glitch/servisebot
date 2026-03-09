@@ -43,15 +43,35 @@ def _pct(value: Any) -> float | None:
 def render_dashboard_image_bytes(mode: str, payload: dict) -> BytesIO:
     if mode == "open":
         mini = payload.get("mini") or []
-        mini_income_per_hour = mini[1] if len(mini) > 1 else "Доход в час: —"
+        mini_income_per_hour = mini[1] if len(mini) > 1 else "Машин: —"
         mini_avg_check = mini[2] if len(mini) > 2 else "Средний чек: —"
+        shift_income = int(payload.get("shift_income") or 0)
+        shift_target = int(payload.get("shift_target") or 0)
+        shift_progress = _pct(payload.get("today_progress"))
+        if shift_income <= 0:
+            shift_badge = "Смена только началась"
+        elif (shift_progress or 0.0) >= 1.0:
+            shift_badge = "В темпе"
+        elif (shift_progress or 0.0) >= 0.9:
+            shift_badge = "Почти по плану"
+        else:
+            shift_badge = "Ниже плана"
+
+        decade_progress = _pct(payload.get("completion_percent"))
+        if (decade_progress or 0.0) >= 1.0:
+            decade_badge = "В темпе"
+        elif (decade_progress or 0.0) >= 0.9:
+            decade_badge = "Почти по плану"
+        else:
+            decade_badge = "Ниже плана"
+
         shift = PerformanceBlock(
             title="Текущая смена",
-            badge="В темпе" if (_pct(payload.get("today_progress")) or 0) >= 0.9 else "Ниже плана",
-            revenue=int(payload.get("shift_income") or 0),
-            target=int(payload.get("shift_target") or 0),
-            remaining=max(0, int(payload.get("shift_target") or 0) - int(payload.get("shift_income") or 0)),
-            run_rate=_pct(payload.get("today_progress")),
+            badge=shift_badge,
+            revenue=shift_income,
+            target=shift_target,
+            remaining=max(0, shift_target - shift_income),
+            run_rate=shift_progress,
             metrics=[
                 MetricItem("Машин", str(int(payload.get("shift_cars") or 0))),
                 MetricItem("Средний чек", str(mini_avg_check).split(":", 1)[-1].strip() or "—"),
@@ -61,23 +81,29 @@ def render_dashboard_image_bytes(mode: str, payload: dict) -> BytesIO:
         )
         decade = PerformanceBlock(
             title="Текущая декада",
-            badge="Идешь по плану",
+            badge=decade_badge,
             revenue=int(payload.get("decade_earned") or 0),
             target=int(payload.get("decade_goal") or 0),
             remaining=int(payload.get("remaining_text", "0").replace("₽", "").replace(" ", "") or 0) if isinstance(payload.get("remaining_text"), str) else int(payload.get("remaining") or 0),
-            run_rate=_pct(payload.get("completion_percent")),
+            run_rate=decade_progress,
             metrics=[MetricItem(k, v) for k, v, *_ in (payload.get("decade_metrics") or [])],
         )
         data = MainDashboardData("Дашборд", "Смена открыта", payload.get("updated_at") or datetime.now(), shift, decade)
         return to_png_bytes(_renderer.render_main_dashboard(data), "dashboard.png")
 
     metrics = [MetricItem(k, v) for k, v, *_ in (payload.get("metrics") or [])]
+    status = str(payload.get("plan_deviation_label") or "").strip()
+    delta_text = str(payload.get("pace_delta_text") or "").strip()
+    if not status and delta_text and delta_text != "—":
+        status = delta_text
+    if not status:
+        status = "Итог смены"
     data = ShiftSummaryData(
         title="Смена закрыта",
         date_label=datetime.now().strftime("%d.%m.%Y"),
         duration_label="Итог",
         total=int(payload.get("earned") or 0),
-        status_message=payload.get("pace_delta_text") or payload.get("plan_deviation_label") or "Итоги смены",
+        status_message=status,
         metrics=metrics,
         decade_total=int(payload.get("earned") or 0),
         decade_remaining=max(0, int(payload.get("goal") or 0) - int(payload.get("earned") or 0)),
