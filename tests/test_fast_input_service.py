@@ -8,9 +8,32 @@ def test_empty_input():
 
 def test_only_number_no_service(monkeypatch):
     from services import fast_input_service as fi
+
     monkeypatch.setattr(fi.DatabaseManager, "get_user_combos", lambda user_id: [])
     r = parse_fast_input("а123вс777", 1, {})
     assert not r.service_ids
+
+
+def test_hru360_combo(monkeypatch):
+    from services import fast_input_service as fi
+
+    combos = [{"id": 1, "alias": "пзз", "service_ids": [2, 3]}]
+    monkeypatch.setattr(fi.DatabaseManager, "get_user_combos", lambda user_id: combos)
+    monkeypatch.setattr(fi.DatabaseManager, "get_combo", lambda combo_id, user_id: combos[0])
+
+    r = parse_fast_input("хру360 пзз", 1, {4: ["чер"]})
+    assert r.service_ids == [2, 3]
+
+
+def test_hru360_combo_plus_service(monkeypatch):
+    from services import fast_input_service as fi
+
+    combos = [{"id": 1, "alias": "пзз", "service_ids": [2]}]
+    monkeypatch.setattr(fi.DatabaseManager, "get_user_combos", lambda user_id: combos)
+    monkeypatch.setattr(fi.DatabaseManager, "get_combo", lambda combo_id, user_id: combos[0])
+
+    r = parse_fast_input("хру360 пзз чер", 1, {3: ["чер"]})
+    assert r.service_ids == [2, 3]
 
 
 def test_unknown_alias(monkeypatch):
@@ -38,13 +61,3 @@ def test_two_combo_rejected(monkeypatch):
     monkeypatch.setattr(fi.DatabaseManager, "get_combo", lambda combo_id, user_id: next(c for c in combos if c["id"] == combo_id))
     r = parse_fast_input("а123вс777 к1 к2", 1, {})
     assert "одно комбо" in r.error_message
-
-
-def test_combo_plus_service(monkeypatch):
-    from services import fast_input_service as fi
-
-    combos = [{"id": 1, "alias": "пзз", "service_ids": [2]}]
-    monkeypatch.setattr(fi.DatabaseManager, "get_user_combos", lambda user_id: combos)
-    monkeypatch.setattr(fi.DatabaseManager, "get_combo", lambda combo_id, user_id: combos[0])
-    r = parse_fast_input("а123вс777 пзз чер", 1, {3: ["чер"]})
-    assert r.service_ids == [2, 3]

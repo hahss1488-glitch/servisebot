@@ -27,25 +27,42 @@ def save_custom_avatar(user_id: int, payload: bytes, directory: Path) -> Path:
     return out
 
 
+def get_avatar_source(user_id: int) -> str:
+    settings = DatabaseManager.get_avatar_settings(user_id)
+    source = settings.get("avatar_source", "telegram")
+    custom = Path(settings.get("custom_avatar_path", "")) if settings.get("custom_avatar_path") else None
+    tg = Path(settings.get("telegram_avatar_path", "")) if settings.get("telegram_avatar_path") else None
+
+    if source == "custom" and custom and custom.exists():
+        return "custom"
+    if tg and tg.exists():
+        return "telegram"
+    return "default"
+
+
 def get_effective_avatar(user_id: int) -> str:
     settings = DatabaseManager.get_avatar_settings(user_id)
     source = settings.get("avatar_source", "telegram")
     custom = Path(settings.get("custom_avatar_path", "")) if settings.get("custom_avatar_path") else None
     tg = Path(settings.get("telegram_avatar_path", "")) if settings.get("telegram_avatar_path") else None
-    if source == "custom" and custom and custom.exists():
-        return str(custom)
+    if source == "custom":
+        if custom and custom.exists():
+            return str(custom)
+        logger.warning("custom avatar missing, fallback to telegram/default user_id=%s", user_id)
     if tg and tg.exists():
         return str(tg)
     return ""
 
 
-def reset_avatar(user_id: int) -> None:
+def reset_avatar(user_id: int) -> str:
     DatabaseManager.reset_avatar_source(user_id)
-    logger.info("avatar reset user_id=%s", user_id)
+    source = get_avatar_source(user_id)
+    logger.info("avatar reset user_id=%s effective_source=%s", user_id, source)
+    return source
 
 
 def build_avatar_preview(path: str) -> bytes | None:
     p = Path(path)
-    if not p.exists():
+    if not p.exists() or not p.is_file():
         return None
     return p.read_bytes()
