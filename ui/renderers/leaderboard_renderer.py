@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_DIR = BASE_DIR / "cache" / "leaderboard"
 BASE_SIZE = (1024, 1536)
-RENDER_VERSION = "v2-layout-fix-2026-03-14"
+RENDER_VERSION = "v3-avatar-name-alignment-2026-03-14"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +53,7 @@ class LeaderboardLayout:
     row_amount_boxes: dict[int, Box]
     updated_small_box: Box
     updated_bottom_box: Box
-    avatar_centers: dict[int, tuple[int, int]]
-    avatar_diameter: int
+    avatar_boxes: dict[int, Box]
 
 
 BASE_LAYOUT = LeaderboardLayout(
@@ -66,9 +65,9 @@ BASE_LAYOUT = LeaderboardLayout(
         3: Box(406, 866, 220, 56),
     },
     name_boxes={
-        1: Box(382, 582, 320, 50),
-        2: Box(384, 770, 310, 50),
-        3: Box(384, 958, 310, 50),
+        1: Box(382, 560, 320, 50),
+        2: Box(384, 748, 310, 50),
+        3: Box(384, 936, 310, 50),
     },
     amount_boxes={
         1: Box(692, 489, 236, 92),
@@ -85,12 +84,11 @@ BASE_LAYOUT = LeaderboardLayout(
     },
     updated_small_box=Box(97, 1238, 430, 52),
     updated_bottom_box=Box(287, 1410, 450, 46),
-    avatar_centers={
-        1: (268, 542),
-        2: (260, 730),
-        3: (259, 918),
+    avatar_boxes={
+        1: Box(170, 468, 156, 156),
+        2: Box(180, 659, 140, 140),
+        3: Box(180, 847, 140, 140),
     },
-    avatar_diameter=146,
 )
 
 RANK_COLORS = {
@@ -143,8 +141,7 @@ def resolve_layout(size: tuple[int, int]) -> LeaderboardLayout:
         row_amount_boxes={k: _scale_box(v, x_ratio, y_ratio) for k, v in BASE_LAYOUT.row_amount_boxes.items()},
         updated_small_box=_scale_box(BASE_LAYOUT.updated_small_box, x_ratio, y_ratio),
         updated_bottom_box=_scale_box(BASE_LAYOUT.updated_bottom_box, x_ratio, y_ratio),
-        avatar_centers={k: (_scaled(v[0], x_ratio), _scaled(v[1], y_ratio)) for k, v in BASE_LAYOUT.avatar_centers.items()},
-        avatar_diameter=_scaled(BASE_LAYOUT.avatar_diameter, min(x_ratio, y_ratio)),
+        avatar_boxes={k: _scale_box(v, x_ratio, y_ratio) for k, v in BASE_LAYOUT.avatar_boxes.items()},
     )
 
 
@@ -374,9 +371,12 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
     for place in (1, 2, 3):
         row = by_place.get(place, {})
         name_raw = _clean_display_name(row.get("name"), "Неизвестный герой")
-        avatar_img = _load_avatar_circle(str(row.get("avatar_path") or "") or None, layout.avatar_diameter, _initials(name_raw))
-        center = layout.avatar_centers[place]
-        canvas.alpha_composite(avatar_img, (center[0] - layout.avatar_diameter // 2, center[1] - layout.avatar_diameter // 2))
+        avatar_box = layout.avatar_boxes[place]
+        avatar_diameter = min(avatar_box.width, avatar_box.height)
+        avatar_img = _load_avatar_circle(str(row.get("avatar_path") or "") or None, avatar_diameter, _initials(name_raw))
+        paste_x = avatar_box.x + (avatar_box.width - avatar_diameter) // 2
+        paste_y = avatar_box.y + (avatar_box.height - avatar_diameter) // 2
+        canvas.alpha_composite(avatar_img, (paste_x, paste_y))
 
         role = str(row.get("rank_prefix") or row.get("rank_text") or "PLAYER").upper()
         role_text, role_font = fit_text_to_width(draw, role, _scaled(190, canvas.width / BASE_SIZE[0]), 24, 20, "bold")
