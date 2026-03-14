@@ -17,10 +17,10 @@ TOKENS = {
 
 
 
-RANK_STYLES = {
-    1: ("ЛЕГЕНДА", "gold"),
-    2: ("PRO", "blue"),
-    3: ("ELITE", "orange"),
+RANK_PREFIX_DEFAULTS = {
+    1: "ЛЕГЕНДА",
+    2: "PRO",
+    3: "ELITE",
 }
 
 
@@ -63,11 +63,9 @@ def _leaderboard_payload(decade_title: str, decade_leaders: list[dict], updated_
             "amount": amount,
         }
         if i <= 3:
-            rank_text, rank_style = RANK_STYLES[i]
             row.update(
                 {
-                    "rank_text": str(src.get("rank_text") or rank_text),
-                    "rank_style": str(src.get("rank_style") or rank_style),
+                    "rank_prefix": str(src.get("rank_prefix") or src.get("rank_text") or RANK_PREFIX_DEFAULTS[i]),
                     "avatar_path": str(src.get("avatar_path") or ""),
                 }
             )

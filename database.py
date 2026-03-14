@@ -176,6 +176,8 @@ def init_database():
         cur.execute("ALTER TABLE user_settings ADD COLUMN custom_avatar_path TEXT DEFAULT ''")
     if "telegram_avatar_path" not in settings_columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN telegram_avatar_path TEXT DEFAULT ''")
+    if "rank_prefix" not in settings_columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN rank_prefix TEXT DEFAULT ''")
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_status_start ON shifts(user_id, status, start_time)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shifts_work_date_user ON shifts(work_date, user_id)")
@@ -760,7 +762,8 @@ class DatabaseManager:
             COALESCE(SUM(c.total_amount), 0) as total_amount,
             COUNT(c.id) as cars_count,
             COUNT(DISTINCT s.id) as shift_count,
-            COALESCE(us.decade_goal, 0) as decade_goal
+            COALESCE(us.decade_goal, 0) as decade_goal,
+            COALESCE(us.rank_prefix, '') as rank_prefix
             FROM users u
             JOIN shifts s ON s.user_id = u.id
             JOIN cars c ON c.shift_id = s.id
@@ -928,6 +931,28 @@ class DatabaseManager:
             "custom_avatar_path": str(row["custom_avatar_path"] or ""),
             "telegram_avatar_path": str(row["telegram_avatar_path"] or ""),
         }
+
+    @staticmethod
+    def get_rank_prefix(user_id: int) -> str:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT rank_prefix FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        return str(row["rank_prefix"] or "") if row else ""
+
+    @staticmethod
+    def set_rank_prefix(user_id: int, rank_prefix: str) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            f"""INSERT INTO user_settings (user_id, rank_prefix)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET rank_prefix = excluded.rank_prefix""",
+            (user_id, (rank_prefix or "").strip()),
+        )
+        conn.commit()
+        conn.close()
 
     @staticmethod
     def set_custom_avatar(user_id: int, path: str) -> None:

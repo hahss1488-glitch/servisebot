@@ -74,10 +74,10 @@ class LeaderboardLayout:
 
 LAYOUT = LeaderboardLayout()
 
-RANK_COLORS: dict[str, tuple[int, int, int, int]] = {
-    "gold": (245, 235, 217, 255),
-    "blue": (89, 196, 255, 255),
-    "orange": (255, 195, 110, 255),
+RANK_COLORS = {
+    1: (247, 216, 255, 255),
+    2: (89, 196, 255, 255),
+    3: (255, 195, 110, 255),
 }
 
 AMOUNT_COLORS = {
@@ -135,21 +135,25 @@ def _default_avatar() -> Image.Image:
     return Image.new("RGB", (148, 148), (44, 59, 92))
 
 
-def _load_avatar_image(path: str | None) -> Image.Image:
+def _load_avatar_image(path: str | None) -> tuple[Image.Image, str]:
     if not path:
-        return _default_avatar()
+        logger.info("leaderboard avatar source=fallback reason=empty-path")
+        return _default_avatar(), "fallback"
     p = Path(path)
     if not p.exists():
-        return _default_avatar()
+        logger.info("leaderboard avatar source=fallback reason=missing-file path=%s", p)
+        return _default_avatar(), "fallback"
     try:
         with Image.open(p) as src:
             img = ImageOps.exif_transpose(src).convert("RGB")
     except OSError:
-        return _default_avatar()
+        logger.info("leaderboard avatar source=fallback reason=decode-error path=%s", p)
+        return _default_avatar(), "fallback"
     side = min(img.size)
     left = (img.width - side) // 2
     top = (img.height - side) // 2
-    return img.crop((left, top, left + side, top + side)).resize((148, 148), Image.Resampling.LANCZOS)
+    logger.info("leaderboard avatar source=file path=%s", p)
+    return img.crop((left, top, left + side, top + side)).resize((148, 148), Image.Resampling.LANCZOS), "file"
 
 
 def _avatar_circle(image: Image.Image, center: tuple[int, int], avatar: Image.Image) -> None:
@@ -187,6 +191,7 @@ def render_fallback(payload: dict[str, Any], out_path: Path) -> Path:
 
 def render_leaderboard(payload: dict[str, Any]) -> Path:
     started = time.perf_counter()
+    logger.info("leaderboard renderer selected=template-v2")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     cache_key = payload_hash(payload)
@@ -202,7 +207,7 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
 
     draw = ImageDraw.Draw(canvas)
     period = str(payload.get("period_text") or "")
-    period_text, period_font = _fit_text_to_width(draw, period, LAYOUT.period_box[2], 40, 30, "bold")
+    period_text, period_font = _fit_text_to_width(draw, period, LAYOUT.period_box[2], 36, 30, "bold")
     draw.text(
         (LAYOUT.period_box[0] + LAYOUT.period_box[2] // 2, LAYOUT.period_box[1] + LAYOUT.period_box[3] // 2),
         period_text,
@@ -216,15 +221,15 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
 
     for place in (1, 2, 3):
         row = by_place.get(place, {})
-        avatar = _load_avatar_image(str(row.get("avatar_path") or "") or None)
+        avatar, avatar_source = _load_avatar_image(str(row.get("avatar_path") or "") or None)
         _avatar_circle(canvas, LAYOUT.avatar_slots[place].center, avatar)
-        logger.info("leaderboard avatar inserted place=%s path=%s", place, row.get("avatar_path") or "default")
+        logger.info("leaderboard avatar inserted place=%s source=%s path=%s", place, avatar_source, row.get("avatar_path") or "default")
 
         rank_box = LAYOUT.rank_slots[place]
-        rank_text = str(row.get("rank_text") or "—")
-        rank_style = str(row.get("rank_style") or "").lower()
-        rank_color = RANK_COLORS.get(rank_style, (242, 245, 255, 255))
-        rank_value, rank_font = _fit_text_to_width(draw, rank_text, rank_box[2], 28 if place == 1 else 30, 22, "bold")
+        rank_text = str(row.get("rank_prefix") or row.get("rank_text") or "—")
+        rank_color = RANK_COLORS.get(place, (242, 245, 255, 255))
+        rank_start_size = 26 if place in (1, 3) else 28
+        rank_value, rank_font = _fit_text_to_width(draw, rank_text, rank_box[2], rank_start_size, 22, "bold")
         draw.text((rank_box[0] + rank_box[2] // 2, rank_box[1] + rank_box[3] // 2), rank_value, fill=rank_color, font=rank_font, anchor="mm")
 
         name_slot = LAYOUT.name_slots[place]
@@ -232,14 +237,15 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
         if place == 1:
             name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 58, 40, "extrabold")
         elif place == 2:
-            name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 48, 34, "bold")
+            name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 44, 34, "extrabold")
         else:
-            name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 56, 38, "extrabold")
+            name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 50, 38, "extrabold")
         draw.text(name_slot.xy, name_text, fill=(255, 255, 255, 255), font=name_font)
 
         amount_box = LAYOUT.amount_slots[place]
         amount = str(row.get("amount") or format_money_rub(int(row.get("total_amount") or 0)))
-        amount_text, amount_font = _fit_text_to_width(draw, amount, amount_box[2], 52 if place == 1 else 48, 30, "extrabold")
+        amount_start_size = {1: 48, 2: 44, 3: 42}[place]
+        amount_text, amount_font = _fit_text_to_width(draw, amount, amount_box[2], amount_start_size, 30, "extrabold")
         draw.text(
             (amount_box[0] + amount_box[2] // 2, amount_box[1] + amount_box[3] // 2),
             amount_text,
@@ -252,15 +258,15 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
         row = by_place.get(place, {})
         name_slot = LAYOUT.tail_name_slots[place]
         name = str(row.get("name") or "—")
-        name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 40, 28, "bold")
+        name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 36, 30, "bold")
         draw.text(name_slot.xy, name_text, fill=(232, 237, 255, 255), font=name_font)
 
         amount = str(row.get("amount") or format_money_rub(int(row.get("total_amount") or 0)))
-        amount_text, amount_font = _fit_text_to_width(draw, amount, 260, 40, 28, "extrabold")
+        amount_text, amount_font = _fit_text_to_width(draw, amount, 260, 36, 30, "extrabold")
         draw.text((LAYOUT.tail_amount_right_x, name_slot.xy[1]), amount_text, fill=(255, 255, 255, 255), font=amount_font, anchor="ra")
 
     updated_text = _format_updated_text(payload.get("updated_text"))
-    fitted_updated, updated_font = _fit_text_to_width(draw, updated_text, LAYOUT.updated_slot.max_width, 34, 24, "semibold")
+    fitted_updated, updated_font = _fit_text_to_width(draw, updated_text, LAYOUT.updated_slot.max_width, 30, 24, "semibold")
     draw.text(LAYOUT.updated_slot.xy, fitted_updated, fill=(215, 221, 242, 255), font=updated_font)
 
     canvas.save(out_path)

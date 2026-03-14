@@ -172,6 +172,11 @@ def get_cached_decade_leaderboard(year: int, month: int, idx: int) -> list[dict]
     value = DatabaseManager.get_decade_leaderboard_daily(year, month, idx)
     return _cache_set(_LEADERBOARD_CACHE, key, value)
 
+
+def invalidate_leaderboard_cache() -> None:
+    _LEADERBOARD_CACHE.clear()
+    logger.info("leaderboard cache invalidated scope=runtime-memory")
+
 def parse_fast_car_with_services(text: str) -> FastParseResult:
     parts = [p.strip(" ,.;:!").lower() for p in text.split() if p.strip()]
     if not parts:
@@ -413,6 +418,7 @@ async def _consume_profile_avatar_upload(update: Update, context: CallbackContex
     try:
         avatar_path = save_custom_avatar(db_user["id"], payload or b"", CUSTOM_AVATAR_DIR)
         invalidate_avatar_cache(db_user["id"], AVATAR_CACHE_DIR)
+        invalidate_leaderboard_cache()
         context.user_data.pop("awaiting_profile_avatar", None)
         await message.reply_text("✅ Кастомный аватар сохранён и применён.")
         preview = build_avatar_preview(str(avatar_path))
@@ -2075,6 +2081,27 @@ async def handle_message(update: Update, context: CallbackContext):
             f"✅ Имя обновлено: {new_name}",
             reply_markup=create_main_reply_keyboard(bool(DatabaseManager.get_active_shift(db_user['id'])), is_subscription_active(updated or db_user)),
         )
+        invalidate_leaderboard_cache()
+        return
+
+    if context.user_data.get("awaiting_profile_rank_prefix"):
+        rank_prefix = " ".join(text.strip().split())
+        if rank_prefix == "-":
+            rank_prefix = ""
+        if len(rank_prefix) > 24:
+            rank_prefix = rank_prefix[:24].rstrip()
+        db_user = DatabaseManager.get_user(user.id)
+        if not db_user:
+            context.user_data.pop("awaiting_profile_rank_prefix", None)
+            await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
+            return
+        DatabaseManager.set_rank_prefix(db_user["id"], rank_prefix)
+        context.user_data.pop("awaiting_profile_rank_prefix", None)
+        invalidate_leaderboard_cache()
+        await update.message.reply_text(
+            f"✅ Префикс ранга обновлён: {rank_prefix or '—'}",
+            reply_markup=create_main_reply_keyboard(bool(DatabaseManager.get_active_shift(db_user['id'])), is_subscription_active(db_user)),
+        )
         return
 
     awaiting_combo_name = context.user_data.get("awaiting_combo_name")
@@ -2369,6 +2396,7 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "profile_change_name": profile_change_name_callback,
         "profile_avatar_upload": profile_avatar_upload_callback,
         "profile_avatar_reset": profile_avatar_reset_callback,
+        "profile_change_rank_prefix": profile_change_rank_prefix_callback,
         "show_price": show_price_callback,
         "calendar_open": calendar_callback,
         "nav:back": nav_back_callback,
@@ -3428,13 +3456,14 @@ def build_profile_text(db_user: dict, telegram_id: int) -> str:
     avatar_source_code = get_avatar_source(db_user["id"])
     source_map = {"custom": "custom", "telegram": "telegram", "default": "default"}
     avatar_source = source_map.get(avatar_source_code, "default")
-    avatar_path = get_effective_avatar(db_user["id"])
+    rank_prefix = DatabaseManager.get_rank_prefix(db_user["id"])
     return (
         f"👤 Профиль: {db_user.get('name', 'Пользователь')}\n"
         f"ID: {telegram_id}\n\n"
         f"Статус: {status_text}\n"
         f"Действует до: {expires_text}\n\n"
-        f"Аватар: {avatar_source}\n\n"
+        f"Аватар: {avatar_source}\n"
+        f"Префикс ранга: {rank_prefix or '—'}\n\n"
         f"Всего сделано машин: {total_cars}\n"
         f"Всего заработано: {format_money(total_earned)}"
     )
@@ -3446,6 +3475,7 @@ def build_profile_keyboard(db_user: dict, telegram_id: int) -> InlineKeyboardMar
         [InlineKeyboardButton("Изменить имя", callback_data="profile_change_name")],
         [InlineKeyboardButton("📸 Загрузить аватар", callback_data="profile_avatar_upload")],
         [InlineKeyboardButton("♻️ Сбросить аватар", callback_data="profile_avatar_reset")],
+        [InlineKeyboardButton("🏷 Изменить префикс ранга", callback_data="profile_change_rank_prefix")],
         [InlineKeyboardButton("Купить подписку", callback_data=callback)],
     ])
 
@@ -3477,6 +3507,7 @@ async def profile_avatar_reset_callback(query, context):
         await query.edit_message_text("❌ Пользователь не найден")
         return
     source = reset_avatar(db_user["id"], CUSTOM_AVATAR_DIR)
+    invalidate_leaderboard_cache()
     context.user_data.pop("awaiting_profile_avatar", None)
     text = build_profile_text(db_user, query.from_user.id) + f"\n\n♻️ Аватар сброшен. Текущий источник: {source}."
     kb = build_profile_keyboard(db_user, query.from_user.id)
@@ -3491,6 +3522,20 @@ async def profile_avatar_reset_callback(query, context):
             await query.edit_message_text(text, reply_markup=kb)
     except Exception:
         await query.message.reply_text(text, reply_markup=kb)
+
+
+
+
+async def profile_change_rank_prefix_callback(query, context):
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+    context.user_data["awaiting_profile_rank_prefix"] = True
+    await query.edit_message_text(
+        "Введи новый префикс ранга (любой текст до 24 символов).\n"
+        "Чтобы очистить префикс — отправь: -"
+    )
 
 
 SECTION_MEDIA_KEYS = {

@@ -11,9 +11,9 @@ def _payload(name: str = "Длинное имя пользователя для 
         "period_text": "1–10 МАРТА",
         "updated_text": datetime(2026, 3, 6, 6, 24),
         "leaders": [
-            {"place": 1, "name": name, "amount": "29 529 ₽", "rank_text": "ЛЕГЕНДА", "rank_style": "gold", "avatar_path": ""},
-            {"place": 2, "name": name, "amount": "18 889 ₽", "rank_text": "PRO", "rank_style": "blue", "avatar_path": ""},
-            {"place": 3, "name": "Nikita", "amount": "16 885 ₽", "rank_text": "ELITE", "rank_style": "orange", "avatar_path": ""},
+            {"place": 1, "name": name, "amount": "29 529 ₽", "rank_prefix": "ЛЕГЕНДА", "avatar_path": ""},
+            {"place": 2, "name": name, "amount": "18 889 ₽", "rank_prefix": "PRO", "avatar_path": ""},
+            {"place": 3, "name": "Nikita", "amount": "16 885 ₽", "rank_prefix": "ELITE", "avatar_path": ""},
             {"place": 4, "name": "Артём", "amount": "14 230 ₽"},
             {"place": 5, "name": "Руслан", "amount": "13 980 ₽"},
         ],
@@ -55,6 +55,6 @@ def test_render_with_incomplete_top(tmp_path, monkeypatch):
     Image.new("RGBA", (1024, 1536), (20, 20, 20, 255)).save(tpl)
     monkeypatch.setattr(lr, "LEADERBOARD_TEMPLATE_PATH", tpl)
     monkeypatch.setattr(lr, "CACHE_DIR", tmp_path / "cache")
-    payload = {"period_text": "1–10 МАРТА", "updated_text": "06.03.2026 06:24 МСК", "leaders": [{"place": 1, "name": "A", "amount": "100 ₽", "rank_text": "ЛЕГЕНДА", "rank_style": "gold", "avatar_path": ""}]}
+    payload = {"period_text": "1–10 МАРТА", "updated_text": "06.03.2026 06:24 МСК", "leaders": [{"place": 1, "name": "A", "amount": "100 ₽", "rank_prefix": "ЛЕГЕНДА", "avatar_path": ""}]}
     out = lr.render_leaderboard(payload)
     assert out.exists()
