@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_DIR = BASE_DIR / "cache" / "leaderboard"
 BASE_SIZE = (1024, 1536)
-RENDER_VERSION = "v3-avatar-name-alignment-2026-03-14"
+RENDER_VERSION = "v4-avatar-circle-name-prefix-up-2026-03-14"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,14 +60,14 @@ BASE_LAYOUT = LeaderboardLayout(
     title_box=Box(236, 240, 552, 74),
     period_box=Box(240, 322, 544, 42),
     role_boxes={
-        1: Box(406, 490, 220, 56),
-        2: Box(406, 678, 220, 56),
-        3: Box(406, 866, 220, 56),
+        1: Box(406, 480, 220, 56),
+        2: Box(406, 668, 220, 56),
+        3: Box(406, 856, 220, 56),
     },
     name_boxes={
-        1: Box(382, 560, 320, 50),
-        2: Box(384, 748, 310, 50),
-        3: Box(384, 936, 310, 50),
+        1: Box(382, 548, 320, 50),
+        2: Box(384, 736, 310, 50),
+        3: Box(384, 924, 310, 50),
     },
     amount_boxes={
         1: Box(692, 489, 236, 92),
@@ -85,9 +85,9 @@ BASE_LAYOUT = LeaderboardLayout(
     updated_small_box=Box(97, 1238, 430, 52),
     updated_bottom_box=Box(287, 1410, 450, 46),
     avatar_boxes={
-        1: Box(170, 468, 156, 156),
-        2: Box(180, 659, 140, 140),
-        3: Box(180, 847, 140, 140),
+        1: Box(170, 460, 156, 156),
+        2: Box(180, 650, 140, 140),
+        3: Box(180, 838, 140, 140),
     },
 )
 
@@ -282,8 +282,9 @@ def _load_avatar_circle(path: str | None, diameter: int, initials: str) -> Image
     else:
         img = Image.new("RGBA", (diameter, diameter), (44, 59, 92, 255))
 
-    mask = Image.new("L", (diameter * 4, diameter * 4), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, diameter * 4 - 1, diameter * 4 - 1), fill=255)
+    mask_scale = 4
+    mask = Image.new("L", (diameter * mask_scale, diameter * mask_scale), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, diameter * mask_scale - 1, diameter * mask_scale - 1), fill=255)
     mask = mask.resize((diameter, diameter), Image.Resampling.LANCZOS)
 
     avatar = Image.new("RGBA", (diameter, diameter), (0, 0, 0, 0))
@@ -424,16 +425,6 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
         "medium",
     )
     draw_text_aligned(draw, layout.updated_small_box, updated_small_text, updated_small_font, (255, 255, 255, 191), align="left", valign="middle")
-
-    updated_bottom_text, updated_bottom_font = fit_text_to_width(
-        draw,
-        updated_text,
-        layout.updated_bottom_box.width,
-        _scaled(28, canvas.width / BASE_SIZE[0]),
-        _scaled(22, canvas.width / BASE_SIZE[0]),
-        "medium",
-    )
-    draw_text_aligned(draw, layout.updated_bottom_box, updated_bottom_text, updated_bottom_font, (255, 255, 255, 230), align="center", valign="middle")
 
     canvas.save(out_path)
     elapsed = (time.perf_counter() - started) * 1000
