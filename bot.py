@@ -43,6 +43,9 @@ from config import BOT_TOKEN, SERVICES, validate_car_number
 from database import DatabaseManager, init_database, DB_PATH
 from exports import create_decade_pdf, create_decade_xlsx, create_month_xlsx
 from services.planning import compute_plan_metrics
+from services.dashboard_state_service import DashboardStateService
+from services.fast_input_service import parse_fast_input, normalize_alias, is_valid_alias
+from services.avatar_service import save_custom_avatar, get_effective_avatar, get_avatar_source, reset_avatar, build_avatar_preview
 from ui.nav import push_screen, pop_screen, get_current_screen, Screen
 from ui.premium_renderer import TOKENS, format_money as format_money_glass, render_dashboard_image_bytes, render_leaderboard_image_bytes
 
@@ -329,20 +332,7 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 
 def resolve_user_avatar_path(user_id: int) -> str:
-    settings = DatabaseManager.get_avatar_settings(user_id)
-    source = settings.get("avatar_source", "telegram")
-    custom = settings.get("custom_avatar_path", "")
-    tg = settings.get("telegram_avatar_path", "")
-    if source == "custom" and custom:
-        p = Path(custom)
-        if p.exists() and p.is_file() and p.stat().st_size > 32:
-            return custom
-        DatabaseManager.reset_avatar_source(user_id)
-    if tg:
-        tp = Path(tg)
-        if tp.exists() and tp.is_file() and tp.stat().st_size > 32:
-            return tg
-    return ""
+    return get_effective_avatar(user_id)
 
 
 async def _refresh_telegram_avatar_cache(context: CallbackContext, telegram_id: int, user_id: int) -> str:
@@ -414,17 +404,12 @@ async def _consume_profile_avatar_upload(update: Update, context: CallbackContex
         return True
 
     try:
-        CUSTOM_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
-        avatar_path = CUSTOM_AVATAR_DIR / f"{db_user['id']}.jpg"
-        with Image.open(BytesIO(payload)) as src:
-            image = src.convert("RGB")
-            image.thumbnail((768, 768), Image.Resampling.LANCZOS)
-            canvas = Image.new("RGB", image.size, "#101826")
-            canvas.paste(image, (0, 0))
-            canvas.save(avatar_path, format="JPEG", quality=90, optimize=True)
-        DatabaseManager.set_custom_avatar(db_user["id"], str(avatar_path))
+        avatar_path = save_custom_avatar(db_user["id"], payload or b"", CUSTOM_AVATAR_DIR)
         context.user_data.pop("awaiting_profile_avatar", None)
         await message.reply_text("✅ Кастомный аватар сохранён и применён.")
+        preview = build_avatar_preview(str(avatar_path))
+        if preview:
+            await message.reply_photo(photo=preview, caption="Превью нового аватара")
     except Exception:
         logger.exception("avatar upload failed user_id=%s", db_user.get("id"))
         await message.reply_text("❌ Не удалось сохранить аватар. Попробуй ещё раз.")
@@ -938,15 +923,9 @@ def create_services_keyboard(
 
     keyboard = []
 
-    combos = DatabaseManager.get_user_combos(user_id) if user_id else []
-    if combos:
-        top_combo = combos[0]
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🧩 {top_combo['name'][:28]}",
-                callback_data=f"combo_apply_{top_combo['id']}_{car_id}_{page}",
-            )
-        ])
+    keyboard.append([
+        InlineKeyboardButton("🧩 Комбо", callback_data=f"combo_menu_{car_id}_{page}_0")
+    ])
 
     keyboard.extend(chunk_buttons(buttons, 3))
 
@@ -1236,136 +1215,91 @@ def _compute_pace_metric(user_id: int, start_d: date, end_d: date, goal: int, ea
 
 
 def _build_open_dashboard_payload(user_id: int, shift: dict, cars: list[dict], total: int) -> dict:
-    db_user = DatabaseManager.get_user_by_id(user_id)
-    p = calculate_current_decade_shift_plan(db_user) if db_user else {}
+    snapshot = DashboardStateService.build_snapshot(user_id)
     shift_start = parse_datetime(shift.get("start_time"))
     shift_target = int(shift.get("shift_target") or 0)
     shift_income = int(total or 0)
-    if shift_target > 0:
-        today_progress = max(0.0, min(1.0, shift_income / shift_target))
-        remaining_shift_text = format_money_glass(max(shift_target - shift_income, 0))
-        today_percent_text = f"{int(today_progress * 100)}%"
-    else:
-        today_progress = None
-        remaining_shift_text = "—"
-        today_percent_text = "—"
 
-    today = now_local().date()
-    _, start_d, end_d, _, title = get_decade_period(today)
-    goal = int(p.get("decade_goal") or 0)
-    earned = int(p.get("earned_decade") or 0)
-    shifts_done = DatabaseManager.get_shifts_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
-    cars_done = DatabaseManager.get_cars_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
-    avg_check = int(earned / cars_done) if cars_done else 0
-    completion_percent = max(0.0, min(1.0, earned / goal)) if goal > 0 else None
-    pace_text, pace_color, pace_delta = _compute_pace_metric(
-        user_id,
-        start_d,
-        end_d,
-        goal,
-        earned,
-        int(p.get("work_units_total") or 0),
-        active_shift_started=shift_start is not None,
-    )
-    delta = int(p.get("delta") or 0)
-    delta_color = TOKENS["POSITIVE"] if delta >= 0 else TOKENS["NEGATIVE"]
-    pace_delta_text = f"{pace_delta:+,}".replace(",", " ") + " ₽ к плану" if pace_text != "Старт" else "—"
+    progress = (snapshot.current_revenue / snapshot.decade_goal) if snapshot.decade_goal > 0 else 0.0
+    trend = snapshot.trend_vs_previous_decade
+    if trend > 0:
+        trend_color = (122, 255, 159, 255)
+        trend_text = f"+{round(trend)}% к прошлой декаде"
+    elif trend < 0:
+        trend_color = (255, 172, 96, 255)
+        trend_text = f"{round(trend)}% к прошлой декаде"
+    else:
+        trend_color = (221, 227, 238, 255)
+        trend_text = "0% к прошлой декаде"
+
     return {
+        "title": "Дашборд",
+        "status": snapshot.status,
+        "period": snapshot.period_label,
+        "decade_title": f"{snapshot.period_start.strftime('%d.%m')}–{snapshot.period_end.strftime('%d.%m')}",
         "shift_start_label": shift_start.strftime("%d.%m %H:%M") if shift_start else "—",
         "shift_income": shift_income,
         "shift_cars": len(cars),
         "shift_target": shift_target,
-        "today_progress": today_progress,
-        "today_percent_text": today_percent_text,
-        "pace_text": pace_text,
-        "pace_color": pace_color,
-        "pace_delta_text": pace_delta_text,
-        "remaining_shift_text": remaining_shift_text,
-        "remaining_text": format_money_glass(int(p.get("remaining") or 0)),
-        "decade_title": f"{title} · {format_decade_range(start_d, end_d)}",
-        "decade_earned": earned,
-        "decade_goal": goal,
-        "decade_progress": completion_percent,
-        "completion_percent": completion_percent,
-        "decade_metrics": [
-            ("Осталось", format_money_glass(int(p.get("remaining") or 0)), TOKENS["TEXT_PRIMARY"]),
-            ("Осталось смен", str(int(p.get("work_units_left") or 0)), TOKENS["TEXT_PRIMARY"]),
-            ("Нужно в смену", format_money_glass(int(p.get("shift_target_now") or 0)), TOKENS["TEXT_PRIMARY"]),
-            ("Средний план", format_money_glass(int(p.get("avg_per_shift") or 0)), TOKENS["TEXT_PRIMARY"]),
-            ("Отклонение от плана", f"{delta:+,}".replace(",", " ") + " ₽", delta_color),
-            ("Темп", pace_text, pace_color),
-        ],
-        "plan_deviation_label": "Опережение плана" if pace_delta > 0 else ("Отставание от плана" if pace_delta < 0 else "Отклонение от плана"),
-        "updated_at": now_local(),
+        "today_progress": (shift_income / shift_target) if shift_target > 0 else 0,
+        "remaining_shift_text": format_money_glass(max(shift_target - shift_income, 0)) if shift_target > 0 else "—",
+        "decade_earned": snapshot.current_revenue,
+        "decade_goal": snapshot.decade_goal,
+        "completion_percent": progress,
+        "remaining_text": format_money_glass(snapshot.remaining_to_goal),
+        "needed_per_shift_text": format_money_glass(snapshot.needed_per_shift),
+        "work_units_left": snapshot.shifts_left,
+        "decade_shifts": snapshot.shifts_count,
+        "decade_cars": snapshot.cars_count,
         "mini": [
-            f"Смен: {shifts_done}",
-            f"Машин: {cars_done}",
-            f"Средний чек: {format_money_glass(avg_check)}",
+            f"Смен: {snapshot.shifts_count}",
+            f"Машин: {snapshot.cars_count}",
+            f"Средний чек: {format_money_glass(snapshot.average_check)}",
         ],
-        "decade_shifts": shifts_done,
-        "decade_cars": cars_done,
+        "trend_text": trend_text,
+        "trend_color": trend_color,
+        "updated_at": snapshot.updated_at,
     }
 
 
 def _build_closed_dashboard_payload(user_id: int, closed_shift: dict | None = None, closed_cars: list[dict] | None = None, closed_total: int | None = None) -> dict:
-    db_user = DatabaseManager.get_user_by_id(user_id)
-    p = calculate_current_decade_shift_plan(db_user) if db_user else {}
-    today = now_local().date()
-    _, start_d, end_d, _, title = get_decade_period(today)
-    earned = int(p.get("earned_decade") or 0)
-    goal = int(p.get("decade_goal") or 0)
-    completion_percent = max(0.0, min(1.0, earned / goal)) if goal > 0 else None
-    pace_text, pace_color, pace_delta = _compute_pace_metric(user_id, start_d, end_d, goal, earned, int(p.get("work_units_total") or 0), active_shift_started=False)
-    delta = int(p.get("delta") or 0)
-    shifts_done = DatabaseManager.get_shifts_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
-    cars_done = DatabaseManager.get_cars_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
-    avg_check = int(earned / cars_done) if cars_done else 0
-    shift_metrics = None
-    shift_plan_done = None
-    shift_hours = None
-    shift_total = 0
-    if closed_shift:
-        cars_list = closed_cars or DatabaseManager.get_shift_cars(int(closed_shift["id"]))
-        total_value = int(closed_total if closed_total is not None else DatabaseManager.get_shift_total(int(closed_shift["id"])))
-        shift_total = total_value
-        shift_metrics = build_shift_metrics(closed_shift, cars_list, total_value)
-        target = int(closed_shift.get("shift_target") or 0)
-        shift_plan_done = (total_value >= target) if target > 0 else None
-        shift_hours = shift_metrics["hours"]
+    snapshot = DashboardStateService.build_snapshot(user_id)
 
-    title_value = "Итоги закрытой смены" if closed_shift else "Дашборд"
-    subtitle_value = f"Смена: {shift_metrics['cars_count']} авто • {format_money_glass(shift_total)}" if shift_metrics else f"{title} · {format_decade_range(start_d, end_d)}"
+    trend = snapshot.trend_vs_previous_decade
+    if trend > 0:
+        trend_color = (122, 255, 159, 255)
+        trend_text = f"+{round(trend)}% к прошлой декаде"
+    elif trend < 0:
+        trend_color = (255, 172, 96, 255)
+        trend_text = f"{round(trend)}% к прошлой декаде"
+    else:
+        trend_color = (221, 227, 238, 255)
+        trend_text = "0% к прошлой декаде"
+
+    progress = (snapshot.current_revenue / snapshot.decade_goal) if snapshot.decade_goal > 0 else 0.0
 
     return {
-        "title": title_value,
-        "decade_title": subtitle_value,
-        "earned": earned,
-        "goal": goal,
-        "progress": completion_percent,
-        "completion_percent": completion_percent,
-        "pace_text": pace_text,
-        "pace_color": pace_color,
-        "metrics": [
-            ("Осталось до цели", format_money_glass(int(p.get("remaining") or 0)), TOKENS["TEXT_PRIMARY"]),
-            ("Осталось смен", str(int(p.get("work_units_left") or 0)), TOKENS["TEXT_PRIMARY"]),
-            ("Нужно в смену", format_money_glass(int(p.get("shift_target_now") or 0)), TOKENS["TEXT_PRIMARY"]),
-            ("Средний план", format_money_glass(int(p.get("avg_per_shift") or 0)), TOKENS["TEXT_PRIMARY"]),
-            ("Отклонение от плана", f"{delta:+,}".replace(",", " ") + " ₽", TOKENS["POSITIVE"] if delta >= 0 else TOKENS["NEGATIVE"]),
-            ("Темп к плану", pace_text, pace_color),
-        ],
-        "plan_deviation_label": "Опережение плана" if pace_delta > 0 else ("Отставание от плана" if pace_delta < 0 else "Отклонение от плана"),
-        "updated_at": now_local(),
+        "title": "Итоги",
+        "status": snapshot.status,
+        "period": snapshot.period_label,
+        "decade_title": f"{snapshot.period_start.strftime('%d.%m')}–{snapshot.period_end.strftime('%d.%m')}",
+        "earned": snapshot.current_revenue,
+        "goal": snapshot.decade_goal,
+        "completion_percent": progress,
+        "remaining_text": format_money_glass(snapshot.remaining_to_goal),
+        "needed_per_shift_text": format_money_glass(snapshot.needed_per_shift),
+        "work_units_left": snapshot.shifts_left,
+        "decade_shifts": snapshot.shifts_count,
+        "decade_cars": snapshot.cars_count,
         "mini": [
-            (f"Машин: {shift_metrics['cars_count']}" if shift_metrics else f"Смен: {shifts_done}"),
-            (f"Часов: {shift_hours:.1f}" if shift_metrics and shift_hours is not None else f"Машин: {cars_done}"),
-            (f"Доход/час: {format_money_glass(int(shift_metrics['money_per_hour']))}" if shift_metrics else f"Средний чек: {format_money_glass(avg_check)}"),
-            ("План смены выполнен ✅" if shift_plan_done is True else "План смены не выполнен ❌" if shift_plan_done is False else f"{pace_delta:+,}".replace(",", " ") + " ₽ к плану"),
+            f"Смен: {snapshot.shifts_count}",
+            f"Машин: {snapshot.cars_count}",
+            f"Средний чек: {format_money_glass(snapshot.average_check)}",
         ],
-        "pace_delta_text": f"{pace_delta:+,}".replace(",", " ") + " ₽ к плану" if pace_text != "Старт" else "—",
-        "decade_shifts": shifts_done,
-        "decade_cars": cars_done,
+        "trend_text": trend_text,
+        "trend_color": trend_color,
+        "updated_at": snapshot.updated_at,
     }
-
 
 
 
@@ -1427,36 +1361,16 @@ def get_goal_text(user_id: int) -> str:
     if not DatabaseManager.is_goal_enabled(user_id):
         return ""
 
-    db_user = DatabaseManager.get_user_by_id(user_id)
-    if not db_user:
+    snapshot = DashboardStateService.build_snapshot(user_id)
+    if snapshot.decade_goal <= 0:
         return ""
 
-    active_shift = DatabaseManager.get_active_shift(user_id)
-    shift_total = DatabaseManager.get_shift_total(active_shift["id"]) if active_shift else 0
-
-    p = calculate_current_decade_shift_plan(db_user)
-    shift_target_now = int(p["shift_target_now"])
-    decade_plan_total = int(p["decade_goal"])
-    shift_target = int(active_shift.get("shift_target") or 0) if active_shift else shift_target_now
-
-    logger.debug(
-        "pinned planning metrics user_id=%s work_units_total=%s work_units_left=%s remaining=%s shift_target=%s avg_per_shift=%s shift_id=%s",
-        user_id,
-        p["work_units_total"],
-        p["work_units_left"],
-        p["remaining"],
-        shift_target,
-        p["avg_per_shift"],
-        active_shift["id"] if active_shift else 0,
-    )
-
-    if decade_plan_total <= 0:
-        return ""
-    percent = 100 if shift_target == 0 else calculate_percent(int(shift_total), shift_target)
+    shift_target = snapshot.active_shift_target or snapshot.needed_per_shift
+    percent = 100 if shift_target == 0 else calculate_percent(int(snapshot.active_shift_revenue), int(shift_target))
     bar = render_bar(percent, 10)
-    if not active_shift:
+    if snapshot.status != "Смена активна":
         return f"Цель смены: {format_money(0)} / {format_money(shift_target)}\nСмена не открыта {bar}"
-    return f"Цель смены: {format_money(int(shift_total))} / {format_money(shift_target)} {bar}"
+    return f"Цель смены: {format_money(int(snapshot.active_shift_revenue))} / {format_money(shift_target)} {bar}"
 
 
 def calculate_current_decade_shift_target(db_user: dict) -> int:
@@ -1883,6 +1797,82 @@ async def handle_message(update: Update, context: CallbackContext):
         await update.message.reply_text("⛔ Доступ к боту закрыт администратором.")
         return
 
+    # Быстрый ввод: "номер + alias комбо/услуг"
+    if db_user_for_access and subscription_active:
+        active_shift = DatabaseManager.get_active_shift(db_user_for_access['id'])
+        if active_shift:
+            parsed = parse_fast_input(text, db_user_for_access['id'], FAST_SERVICE_ALIASES)
+            if parsed.car_number and parsed.service_ids:
+                car_id = DatabaseManager.add_car(active_shift['id'], parsed.car_number)
+                mode = get_price_mode(context, db_user_for_access["id"])
+                total_qty = 0
+                for sid in parsed.service_ids:
+                    service = SERVICES.get(int(sid))
+                    if not service or service.get('kind') in {'group', 'distance'}:
+                        continue
+                    DatabaseManager.add_service_to_car(
+                        car_id,
+                        int(sid),
+                        plain_service_name(service['name']),
+                        get_current_price(int(sid), mode),
+                    )
+                    total_qty += 1
+
+                car = DatabaseManager.get_car(car_id)
+                note = f"\nНе распознано: {', '.join(parsed.unknown_tokens)}" if parsed.unknown_tokens else ""
+                await update.message.reply_text(
+                    f"🚗 Быстро добавлено: {parsed.car_number}\n"
+                    f"Услуг: {total_qty}\n"
+                    f"Сумма: {format_money(int(car['total_amount']) if car else 0)}{note}"
+                )
+                try:
+                    await send_goal_status(update, context, db_user_for_access['id'])
+                except Exception:
+                    logger.exception("send_goal_status failed in fast add for user_id=%s", db_user_for_access.get("id"))
+                return
+            if parsed.car_number and not parsed.service_ids and len(text.split()) > 1:
+                detail = f"\nНераспознанные токены: {', '.join(parsed.unknown_tokens)}" if parsed.unknown_tokens else ""
+                await update.message.reply_text(f"❌ {parsed.error_message}{detail}")
+                return
+
+    if is_admin_telegram(user.id) and db_user_for_access:
+        section = context.user_data.get("awaiting_admin_section_photo")
+        if section:
+            photo = update.message.photo[-1] if update.message.photo else None
+            if not photo:
+                await update.message.reply_text("Пришлите фото (изображение).")
+                return
+            set_section_photo_file_id(section, photo.file_id)
+            context.user_data.pop("awaiting_admin_section_photo", None)
+            await update.message.reply_text("✅ Фото сохранено для раздела.")
+            return
+
+        if context.user_data.get("awaiting_admin_faq_video") and update.message.video:
+            video = update.message.video
+            DatabaseManager.set_app_content("faq_video_file_id", video.file_id)
+            DatabaseManager.set_app_content("faq_video_source_chat_id", str(update.message.chat_id))
+            DatabaseManager.set_app_content("faq_video_source_message_id", str(update.message.message_id))
+            context.user_data.pop("awaiting_admin_faq_video", None)
+            await update.message.reply_text("✅ Видео FAQ обновлено. Пользователи будут получать его как полноценное видео.")
+            return
+
+    if db_user_for_access and await _consume_profile_avatar_upload(update, context, db_user_for_access):
+        return
+
+
+async def handle_message(update: Update, context: CallbackContext):
+    """Обработка текстовых сообщений"""
+    user = update.effective_user
+    text = (update.message.text or "").strip()
+    db_user_for_access, blocked, subscription_active = resolve_user_access(user.id, context)
+    if not db_user_for_access:
+        db_user_for_access = ensure_db_user(user)
+        if db_user_for_access:
+            subscription_active = is_subscription_active(db_user_for_access)
+    if blocked:
+        await update.message.reply_text("⛔ Доступ к боту закрыт администратором.")
+        return
+
     # Быстрый ввод: "номер + сокращения услуг"
     if db_user_for_access and subscription_active:
         active_shift = DatabaseManager.get_active_shift(db_user_for_access['id'])
@@ -2081,8 +2071,8 @@ async def handle_message(update: Update, context: CallbackContext):
 
     awaiting_combo_name = context.user_data.get("awaiting_combo_name")
     if awaiting_combo_name:
-        name = text.strip()
-        if not name:
+        raw = text.strip()
+        if not raw:
             await update.message.reply_text("Название не может быть пустым")
             return
         db_user = DatabaseManager.get_user(user.id)
@@ -2094,9 +2084,68 @@ async def handle_message(update: Update, context: CallbackContext):
             context.user_data.pop("awaiting_combo_name", None)
             await update.message.reply_text("❌ Список услуг пуст, начните заново.")
             return
-        DatabaseManager.save_user_combo(db_user['id'], name, service_ids)
+
+        if "|" in raw:
+            name, combo_alias_raw = [x.strip() for x in raw.split("|", 1)]
+        else:
+            name, combo_alias_raw = raw, ""
+        combo_alias = normalize_alias(combo_alias_raw)
+        if combo_alias_raw and not combo_alias:
+            await update.message.reply_text("❌ Alias пустой. Формат: Название | alias")
+            return
+        if combo_alias:
+            if not is_valid_alias(combo_alias):
+                await update.message.reply_text("❌ Alias должен быть 2-16 символов: буквы/цифры/_/-")
+                return
+            if DatabaseManager.is_combo_alias_taken(db_user['id'], combo_alias):
+                await update.message.reply_text("❌ Такой alias комбо уже существует.")
+                return
+            for aliases in FAST_SERVICE_ALIASES.values():
+                if combo_alias in {normalize_alias(a) for a in aliases}:
+                    await update.message.reply_text("❌ Alias комбо конфликтует с alias услуги.")
+                    return
+
+        DatabaseManager.save_user_combo(db_user['id'], name, service_ids, alias=combo_alias)
         context.user_data.pop("awaiting_combo_name", None)
-        await update.message.reply_text(f"✅ Комбо «{name}» сохранено")
+        suffix = f" (alias: {combo_alias})" if combo_alias else ""
+        await update.message.reply_text(f"✅ Комбо «{name}» сохранено{suffix}")
+        return
+
+    awaiting_combo_rename = context.user_data.get("awaiting_combo_rename")
+    if awaiting_combo_rename:
+        db_user = DatabaseManager.get_user(user.id)
+        if not db_user:
+            context.user_data.pop("awaiting_combo_rename", None)
+            await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
+            return
+        raw = text.strip()
+        if not raw:
+            await update.message.reply_text("❌ Название не может быть пустым")
+            return
+        if "|" in raw:
+            new_name, alias_raw = [x.strip() for x in raw.split("|", 1)]
+        else:
+            new_name, alias_raw = raw, ""
+        combo_alias = normalize_alias(alias_raw)
+        if combo_alias and not is_valid_alias(combo_alias):
+            await update.message.reply_text("❌ Alias должен быть 2-16 символов: буквы/цифры/_/-")
+            return
+        combo_id = int(awaiting_combo_rename)
+        if not DatabaseManager.update_combo_name(combo_id, db_user["id"], new_name):
+            context.user_data.pop("awaiting_combo_rename", None)
+            await update.message.reply_text("❌ Комбо не найдено")
+            return
+        if combo_alias:
+            if DatabaseManager.is_combo_alias_taken(db_user["id"], combo_alias, exclude_combo_id=combo_id):
+                await update.message.reply_text("❌ Такой alias комбо уже существует")
+                return
+            for aliases in FAST_SERVICE_ALIASES.values():
+                if combo_alias in {normalize_alias(a) for a in aliases}:
+                    await update.message.reply_text("❌ Alias комбо конфликтует с alias услуги")
+                    return
+            DatabaseManager.update_combo_alias(combo_id, db_user["id"], combo_alias)
+        context.user_data.pop("awaiting_combo_rename", None)
+        await update.message.reply_text("✅ Комбо обновлено")
         return
 
     if context.user_data.get('awaiting_service_search'):
@@ -2275,6 +2324,7 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "open_shift": open_shift,
         "add_car": add_car,
         "current_shift": current_shift,
+        "refresh_dashboard": current_shift,
         "history_0": history,
         "settings": settings,
         "change_decade_goal": change_decade_goal,
@@ -2567,7 +2617,7 @@ async def current_shift(query, context):
                 filename="dashboard.png",
                 caption="📊 Дашборд",
             )
-            await query.edit_message_text("📭 Нет активной смены. Показал прогресс декады.")
+            await query.edit_message_text("📭 Нет активной смены. Показал прогресс декады.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Обновить дашборд", callback_data="refresh_dashboard")]]))
         else:
             await query.edit_message_text(text_message, parse_mode="HTML")
         await query.message.reply_text(
@@ -2587,7 +2637,7 @@ async def current_shift(query, context):
             logger.exception("dashboard open image render failed")
     if image is not None:
         await context.bot.send_photo(chat_id=query.message.chat_id, photo=image, filename="dashboard.png", caption="📊 Дашборд")
-        await query.edit_message_text("✅ Дашборд сформирован")
+        await query.edit_message_text("✅ Дашборд сформирован", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Обновить дашборд", callback_data="refresh_dashboard")]]))
     else:
         await query.edit_message_text(
             message,
@@ -2679,7 +2729,7 @@ async def combo_builder_save(query, context):
         await query.answer("Сначала выберите хотя бы одну услугу")
         return
     context.user_data["awaiting_combo_name"] = {"service_ids": payload["selected"], "car_id": None, "page": 0}
-    await query.edit_message_text("Введите название нового комбо в чат")
+    await query.edit_message_text("Введите название нового комбо в чат (можно: Название | alias)")
 
 
 async def admin_panel(query, context):
@@ -3367,9 +3417,10 @@ def build_profile_text(db_user: dict, telegram_id: int) -> str:
     status_text = "✅ Подписка активна" if is_subscription_active(db_user) else "⛔ Подписка неактивна"
     total_cars = DatabaseManager.get_cars_count_between_dates(db_user["id"], "2000-01-01", "2100-01-01")
     total_earned = DatabaseManager.get_user_total_between_dates(db_user["id"], "2000-01-01", "2100-01-01")
-    avatar_meta = DatabaseManager.get_avatar_settings(db_user["id"])
-    source_map = {"custom": "кастомный", "telegram": "Telegram/дефолт"}
-    avatar_source = source_map.get(avatar_meta.get("avatar_source", "telegram"), "Telegram/дефолт")
+    avatar_source_code = get_avatar_source(db_user["id"])
+    source_map = {"custom": "custom", "telegram": "telegram", "default": "default"}
+    avatar_source = source_map.get(avatar_source_code, "default")
+    avatar_path = get_effective_avatar(db_user["id"])
     return (
         f"👤 Профиль: {db_user.get('name', 'Пользователь')}\n"
         f"ID: {telegram_id}\n\n"
@@ -3417,11 +3468,21 @@ async def profile_avatar_reset_callback(query, context):
     if not db_user:
         await query.edit_message_text("❌ Пользователь не найден")
         return
-    DatabaseManager.reset_avatar_source(db_user["id"])
+    source = reset_avatar(db_user["id"])
     context.user_data.pop("awaiting_profile_avatar", None)
-    text = build_profile_text(db_user, query.from_user.id)
+    text = build_profile_text(db_user, query.from_user.id) + f"\n\n♻️ Аватар сброшен. Текущий источник: {source}."
     kb = build_profile_keyboard(db_user, query.from_user.id)
-    await query.edit_message_text(text, reply_markup=kb)
+    avatar = get_effective_avatar(db_user["id"])
+    try:
+        if avatar:
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=Path(avatar).read_bytes(), caption=text[:1024]),
+                reply_markup=kb,
+            )
+        else:
+            await query.edit_message_text(text, reply_markup=kb)
+    except Exception:
+        await query.message.reply_text(text, reply_markup=kb)
 
 
 SECTION_MEDIA_KEYS = {
@@ -3463,13 +3524,13 @@ async def account_message(update: Update, context: CallbackContext):
         await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
         return
 
-    await send_text_with_optional_photo(
-        update.message,
-        context,
-        build_profile_text(db_user, update.effective_user.id),
-        reply_markup=build_profile_keyboard(db_user, update.effective_user.id),
-        section="profile",
-    )
+    text = build_profile_text(db_user, update.effective_user.id)
+    kb = build_profile_keyboard(db_user, update.effective_user.id)
+    avatar = get_effective_avatar(db_user["id"])
+    if avatar:
+        await update.message.reply_photo(photo=Path(avatar).read_bytes(), caption=text[:1024], reply_markup=kb)
+    else:
+        await send_text_with_optional_photo(update.message, context, text, reply_markup=kb, section="profile")
 
 
 async def account_info_callback(query, context):
@@ -3480,12 +3541,13 @@ async def account_info_callback(query, context):
 
     profile_text = build_profile_text(db_user, query.from_user.id)
     profile_keyboard = build_profile_keyboard(db_user, query.from_user.id)
-    profile_photo = get_section_photo_file_id("profile")
+    avatar = get_effective_avatar(db_user["id"])
+    profile_photo = avatar if avatar else get_section_photo_file_id("profile")
 
     if profile_photo:
         try:
             await query.edit_message_media(
-                media=InputMediaPhoto(media=profile_photo, caption=profile_text[:1024]),
+                media=InputMediaPhoto(media=Path(profile_photo).read_bytes() if Path(str(profile_photo)).exists() else profile_photo, caption=profile_text[:1024]),
                 reply_markup=profile_keyboard,
             )
             return
@@ -4195,18 +4257,33 @@ async def show_combo_menu(query, context, data):
         return
     car_id = int(parts[2])
     page = int(parts[3])
+    combo_page = int(parts[4]) if len(parts) > 4 else 0
 
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         await query.edit_message_text("❌ Пользователь не найден")
         return
 
-    combos = DatabaseManager.get_user_combos(db_user['id'])
+    all_combos = DatabaseManager.get_user_combos(db_user['id'])
+    combos = []
+    for combo in all_combos:
+        try:
+            if not isinstance(combo.get("service_ids"), list):
+                raise ValueError("service_ids must be list")
+            combos.append(combo)
+        except (TypeError, KeyError, ValueError):
+            logger.warning("broken combo row user_id=%s combo=%s", db_user['id'], combo)
+    per_page = 8
+    max_page = max((len(combos) - 1) // per_page, 0)
+    combo_page = max(0, min(combo_page, max_page))
+    current = combos[combo_page * per_page:(combo_page + 1) * per_page]
+
     keyboard = []
-    for combo in combos:
+    for combo in current:
+        alias = f" ({combo.get('alias')})" if combo.get('alias') else ""
         keyboard.append([
             InlineKeyboardButton(
-                f"▶️ {combo['name']}",
+                f"▶️ {combo['name'][:24]}{alias}",
                 callback_data=f"combo_apply_{combo['id']}_{car_id}_{page}",
             ),
             InlineKeyboardButton(
@@ -4215,8 +4292,18 @@ async def show_combo_menu(query, context, data):
             ),
         ])
 
+    nav = []
+    if combo_page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"combo_menu_{car_id}_{page}_{combo_page-1}"))
+    nav.append(InlineKeyboardButton(f"{combo_page+1}/{max_page+1}", callback_data="noop"))
+    if combo_page < max_page:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"combo_menu_{car_id}_{page}_{combo_page+1}"))
+    if nav:
+        keyboard.append(nav)
+
     keyboard.append([InlineKeyboardButton("⬅️ К услугам", callback_data=f"back_to_services_{car_id}_{page}")])
-    text_msg = "🧩 У вас пока нет сохранённых комбо.\nСоздайте их в настройках: «Мои комбинации»." if not combos else "🧩 Выберите комбинацию для применения:"
+    text_msg = "🧩 У вас пока нет сохранённых комбо.\nСоздайте их в настройках: «Мои комбинации»." if not combos else f"🧩 Выберите комбинацию для применения (всего: {len(combos)}):"
+    logger.info("combo list user_id=%s total=%s page=%s", db_user['id'], len(combos), combo_page)
     await query.edit_message_text(text_msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -4313,7 +4400,7 @@ async def combo_edit_menu(query, context, data):
 async def combo_start_rename(query, context, data):
     combo_id = int(data.replace('combo_rename_', '').split('_')[0])
     context.user_data['awaiting_combo_rename'] = combo_id
-    await query.edit_message_text("Введите новое название комбо в чат.")
+    await query.edit_message_text("Введите новое название комбо (или Название | alias).")
 
 
 async def combo_settings_menu(query, context):
@@ -4336,14 +4423,14 @@ async def combo_settings_menu(query, context):
     keyboard = []
     for combo in combos:
         keyboard.append([
-            InlineKeyboardButton(combo['name'], callback_data=f"combo_edit_{combo['id']}_0_0"),
+            InlineKeyboardButton(f"{combo['name']}" + (f" ({combo.get('alias')})" if combo.get('alias') else ""), callback_data=f"combo_edit_{combo['id']}_0_0"),
         ])
     keyboard.append([InlineKeyboardButton("➕ Создать комбо", callback_data="combo_create_settings")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
     await query.edit_message_text(
         "🧩 Комбо\n"
         "Собери набор услуг для быстрого выбора в один тап.\n\n"
-        "Мои комбинации:",
+        f"Мои комбинации ({len(combos)}):",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -4369,10 +4456,10 @@ async def combo_settings_menu_for_message(update: Update, context: CallbackConte
         return
     keyboard = []
     for combo in combos:
-        keyboard.append([InlineKeyboardButton(combo['name'], callback_data=f"combo_edit_{combo['id']}_0_0")])
+        keyboard.append([InlineKeyboardButton(f"{combo['name']}" + (f" ({combo.get('alias')})" if combo.get('alias') else ""), callback_data=f"combo_edit_{combo['id']}_0_0")])
     keyboard.append([InlineKeyboardButton("➕ Создать комбо", callback_data="combo_create_settings")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
-    await update.message.reply_text(f"{combo_intro}\n\n🧩 Мои комбинации:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(f"{combo_intro}\n\n🧩 Мои комбинации ({len(combos)}):", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def export_csv(query, context):
@@ -4703,10 +4790,13 @@ def build_dashboard_image_bytes_closed(payload: dict) -> BytesIO | None:
 
 
 async def build_dashboard_image_cached(mode: str, user_id: int, payload: dict) -> BytesIO | None:
-    key = f"{mode}:{user_id}"
+    payload_key = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    key = f"{mode}:{user_id}:{hash(payload_key)}"
     cached = _cache_get(_DASHBOARD_CACHE, key)
     if cached is not None:
+        logger.info("dashboard cache hit user_id=%s mode=%s", user_id, mode)
         return cached
+    logger.info("dashboard cache miss user_id=%s mode=%s", user_id, mode)
     if mode == "open":
         image = await asyncio.to_thread(build_dashboard_image_bytes_open, payload)
     else:
