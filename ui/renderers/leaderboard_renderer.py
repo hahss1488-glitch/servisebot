@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_DIR = BASE_DIR / "cache" / "leaderboard"
 BASE_SIZE = (1024, 1536)
+RENDER_VERSION = "v4-avatar-circle-name-prefix-up-2026-03-14"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class Box:
 
 @dataclass(frozen=True, slots=True)
 class LeaderboardLayout:
+    title_box: Box
     period_box: Box
     role_boxes: dict[int, Box]
     name_boxes: dict[int, Box]
@@ -51,21 +53,21 @@ class LeaderboardLayout:
     row_amount_boxes: dict[int, Box]
     updated_small_box: Box
     updated_bottom_box: Box
-    avatar_centers: dict[int, tuple[int, int]]
-    avatar_diameter: int
+    avatar_boxes: dict[int, Box]
 
 
 BASE_LAYOUT = LeaderboardLayout(
+    title_box=Box(236, 240, 552, 74),
     period_box=Box(240, 322, 544, 42),
     role_boxes={
-        1: Box(406, 490, 220, 56),
-        2: Box(406, 678, 220, 56),
-        3: Box(406, 866, 220, 56),
+        1: Box(406, 480, 220, 56),
+        2: Box(406, 668, 220, 56),
+        3: Box(406, 856, 220, 56),
     },
     name_boxes={
-        1: Box(382, 582, 320, 50),
-        2: Box(384, 770, 310, 50),
-        3: Box(384, 958, 310, 50),
+        1: Box(382, 548, 320, 50),
+        2: Box(384, 736, 310, 50),
+        3: Box(384, 924, 310, 50),
     },
     amount_boxes={
         1: Box(692, 489, 236, 92),
@@ -73,8 +75,8 @@ BASE_LAYOUT = LeaderboardLayout(
         3: Box(692, 865, 236, 92),
     },
     row_name_boxes={
-        4: Box(96, 1052, 610, 60),
-        5: Box(96, 1148, 610, 60),
+        4: Box(200, 1052, 520, 60),
+        5: Box(200, 1148, 520, 60),
     },
     row_amount_boxes={
         4: Box(738, 1050, 190, 60),
@@ -82,12 +84,11 @@ BASE_LAYOUT = LeaderboardLayout(
     },
     updated_small_box=Box(97, 1238, 430, 52),
     updated_bottom_box=Box(287, 1410, 450, 46),
-    avatar_centers={
-        1: (268, 542),
-        2: (260, 730),
-        3: (259, 918),
+    avatar_boxes={
+        1: Box(170, 460, 156, 156),
+        2: Box(180, 650, 140, 140),
+        3: Box(180, 838, 140, 140),
     },
-    avatar_diameter=146,
 )
 
 RANK_COLORS = {
@@ -108,7 +109,8 @@ def serialize_payload(payload: dict[str, Any]) -> str:
 
 
 def payload_hash(payload: dict[str, Any]) -> str:
-    return hashlib.sha256(serialize_payload(payload).encode("utf-8")).hexdigest()
+    payload_with_version = {"_renderer_version": RENDER_VERSION, **payload}
+    return hashlib.sha256(serialize_payload(payload_with_version).encode("utf-8")).hexdigest()
 
 
 def _scaled(value: int, ratio: float) -> int:
@@ -130,6 +132,7 @@ def resolve_layout(size: tuple[int, int]) -> LeaderboardLayout:
     if x_ratio == 1 and y_ratio == 1:
         return BASE_LAYOUT
     return LeaderboardLayout(
+        title_box=_scale_box(BASE_LAYOUT.title_box, x_ratio, y_ratio),
         period_box=_scale_box(BASE_LAYOUT.period_box, x_ratio, y_ratio),
         role_boxes={k: _scale_box(v, x_ratio, y_ratio) for k, v in BASE_LAYOUT.role_boxes.items()},
         name_boxes={k: _scale_box(v, x_ratio, y_ratio) for k, v in BASE_LAYOUT.name_boxes.items()},
@@ -138,8 +141,7 @@ def resolve_layout(size: tuple[int, int]) -> LeaderboardLayout:
         row_amount_boxes={k: _scale_box(v, x_ratio, y_ratio) for k, v in BASE_LAYOUT.row_amount_boxes.items()},
         updated_small_box=_scale_box(BASE_LAYOUT.updated_small_box, x_ratio, y_ratio),
         updated_bottom_box=_scale_box(BASE_LAYOUT.updated_bottom_box, x_ratio, y_ratio),
-        avatar_centers={k: (_scaled(v[0], x_ratio), _scaled(v[1], y_ratio)) for k, v in BASE_LAYOUT.avatar_centers.items()},
-        avatar_diameter=_scaled(BASE_LAYOUT.avatar_diameter, min(x_ratio, y_ratio)),
+        avatar_boxes={k: _scale_box(v, x_ratio, y_ratio) for k, v in BASE_LAYOUT.avatar_boxes.items()},
     )
 
 
@@ -280,8 +282,9 @@ def _load_avatar_circle(path: str | None, diameter: int, initials: str) -> Image
     else:
         img = Image.new("RGBA", (diameter, diameter), (44, 59, 92, 255))
 
-    mask = Image.new("L", (diameter * 4, diameter * 4), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, diameter * 4 - 1, diameter * 4 - 1), fill=255)
+    mask_scale = 4
+    mask = Image.new("L", (diameter * mask_scale, diameter * mask_scale), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, diameter * mask_scale - 1, diameter * mask_scale - 1), fill=255)
     mask = mask.resize((diameter, diameter), Image.Resampling.LANCZOS)
 
     avatar = Image.new("RGBA", (diameter, diameter), (0, 0, 0, 0))
@@ -308,6 +311,21 @@ def load_template() -> Image.Image | None:
             return None
     logger.error("leaderboard template missing path=%s", LEADERBOARD_TEMPLATE_PATH)
     return None
+
+
+
+def _title_region_has_text(canvas: Image.Image, box: Box) -> bool:
+    region = canvas.crop((box.x, box.y, box.right, box.bottom)).convert("L")
+    histogram = region.histogram()
+    bright_pixels = sum(histogram[170:])
+    return bright_pixels > 2200
+
+
+def _render_top_title(draw: ImageDraw.ImageDraw, canvas: Image.Image, layout: LeaderboardLayout) -> None:
+    if _title_region_has_text(canvas, layout.title_box):
+        return
+    title_text, title_font = fit_text_to_width(draw, "ТОП ГЕРОЕВ", layout.title_box.width, 64, 54, "extrabold")
+    draw_text_aligned(draw, layout.title_box, title_text, title_font, (245, 245, 250, 255), align="center", valign="middle")
 
 
 def render_fallback(payload: dict[str, Any], out_path: Path) -> Path:
@@ -342,6 +360,8 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
     layout = resolve_layout(canvas.size)
     draw = ImageDraw.Draw(canvas)
 
+    _render_top_title(draw, canvas, layout)
+
     period = str(payload.get("period_text") or "Текущий период")
     period_text, period_font = fit_text_to_width(draw, period, layout.period_box.width, 32, 26, "bold")
     draw_text_aligned(draw, layout.period_box, period_text, period_font, (245, 245, 250, 255), align="center", valign="middle")
@@ -352,9 +372,12 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
     for place in (1, 2, 3):
         row = by_place.get(place, {})
         name_raw = _clean_display_name(row.get("name"), "Неизвестный герой")
-        avatar_img = _load_avatar_circle(str(row.get("avatar_path") or "") or None, layout.avatar_diameter, _initials(name_raw))
-        center = layout.avatar_centers[place]
-        canvas.alpha_composite(avatar_img, (center[0] - layout.avatar_diameter // 2, center[1] - layout.avatar_diameter // 2))
+        avatar_box = layout.avatar_boxes[place]
+        avatar_diameter = min(avatar_box.width, avatar_box.height)
+        avatar_img = _load_avatar_circle(str(row.get("avatar_path") or "") or None, avatar_diameter, _initials(name_raw))
+        paste_x = avatar_box.x + (avatar_box.width - avatar_diameter) // 2
+        paste_y = avatar_box.y + (avatar_box.height - avatar_diameter) // 2
+        canvas.alpha_composite(avatar_img, (paste_x, paste_y))
 
         role = str(row.get("rank_prefix") or row.get("rank_text") or "PLAYER").upper()
         role_text, role_font = fit_text_to_width(draw, role, _scaled(190, canvas.width / BASE_SIZE[0]), 24, 20, "bold")
@@ -402,16 +425,6 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
         "medium",
     )
     draw_text_aligned(draw, layout.updated_small_box, updated_small_text, updated_small_font, (255, 255, 255, 191), align="left", valign="middle")
-
-    updated_bottom_text, updated_bottom_font = fit_text_to_width(
-        draw,
-        updated_text,
-        layout.updated_bottom_box.width,
-        _scaled(28, canvas.width / BASE_SIZE[0]),
-        _scaled(22, canvas.width / BASE_SIZE[0]),
-        "medium",
-    )
-    draw_text_aligned(draw, layout.updated_bottom_box, updated_bottom_text, updated_bottom_font, (255, 255, 255, 230), align="center", valign="middle")
 
     canvas.save(out_path)
     elapsed = (time.perf_counter() - started) * 1000
