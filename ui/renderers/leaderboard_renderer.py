@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_DIR = BASE_DIR / "cache" / "leaderboard"
 BASE_SIZE = (1024, 1536)
+RENDER_VERSION = "v2-layout-fix-2026-03-14"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class Box:
 
 @dataclass(frozen=True, slots=True)
 class LeaderboardLayout:
+    title_box: Box
     period_box: Box
     role_boxes: dict[int, Box]
     name_boxes: dict[int, Box]
@@ -56,6 +58,7 @@ class LeaderboardLayout:
 
 
 BASE_LAYOUT = LeaderboardLayout(
+    title_box=Box(236, 240, 552, 74),
     period_box=Box(240, 322, 544, 42),
     role_boxes={
         1: Box(406, 490, 220, 56),
@@ -73,8 +76,8 @@ BASE_LAYOUT = LeaderboardLayout(
         3: Box(692, 865, 236, 92),
     },
     row_name_boxes={
-        4: Box(96, 1052, 610, 60),
-        5: Box(96, 1148, 610, 60),
+        4: Box(200, 1052, 520, 60),
+        5: Box(200, 1148, 520, 60),
     },
     row_amount_boxes={
         4: Box(738, 1050, 190, 60),
@@ -108,7 +111,8 @@ def serialize_payload(payload: dict[str, Any]) -> str:
 
 
 def payload_hash(payload: dict[str, Any]) -> str:
-    return hashlib.sha256(serialize_payload(payload).encode("utf-8")).hexdigest()
+    payload_with_version = {"_renderer_version": RENDER_VERSION, **payload}
+    return hashlib.sha256(serialize_payload(payload_with_version).encode("utf-8")).hexdigest()
 
 
 def _scaled(value: int, ratio: float) -> int:
@@ -130,6 +134,7 @@ def resolve_layout(size: tuple[int, int]) -> LeaderboardLayout:
     if x_ratio == 1 and y_ratio == 1:
         return BASE_LAYOUT
     return LeaderboardLayout(
+        title_box=_scale_box(BASE_LAYOUT.title_box, x_ratio, y_ratio),
         period_box=_scale_box(BASE_LAYOUT.period_box, x_ratio, y_ratio),
         role_boxes={k: _scale_box(v, x_ratio, y_ratio) for k, v in BASE_LAYOUT.role_boxes.items()},
         name_boxes={k: _scale_box(v, x_ratio, y_ratio) for k, v in BASE_LAYOUT.name_boxes.items()},
@@ -310,6 +315,21 @@ def load_template() -> Image.Image | None:
     return None
 
 
+
+def _title_region_has_text(canvas: Image.Image, box: Box) -> bool:
+    region = canvas.crop((box.x, box.y, box.right, box.bottom)).convert("L")
+    histogram = region.histogram()
+    bright_pixels = sum(histogram[170:])
+    return bright_pixels > 2200
+
+
+def _render_top_title(draw: ImageDraw.ImageDraw, canvas: Image.Image, layout: LeaderboardLayout) -> None:
+    if _title_region_has_text(canvas, layout.title_box):
+        return
+    title_text, title_font = fit_text_to_width(draw, "ТОП ГЕРОЕВ", layout.title_box.width, 64, 54, "extrabold")
+    draw_text_aligned(draw, layout.title_box, title_text, title_font, (245, 245, 250, 255), align="center", valign="middle")
+
+
 def render_fallback(payload: dict[str, Any], out_path: Path) -> Path:
     canvas = Image.new("RGBA", BASE_SIZE, (18, 25, 42, 255))
     draw = ImageDraw.Draw(canvas)
@@ -341,6 +361,8 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
 
     layout = resolve_layout(canvas.size)
     draw = ImageDraw.Draw(canvas)
+
+    _render_top_title(draw, canvas, layout)
 
     period = str(payload.get("period_text") or "Текущий период")
     period_text, period_font = fit_text_to_width(draw, period, layout.period_box.width, 32, 26, "bold")
