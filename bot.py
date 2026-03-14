@@ -46,7 +46,6 @@ from services.planning import compute_plan_metrics
 from services.dashboard_state_service import DashboardStateService
 from services.fast_input_service import parse_fast_input, normalize_alias, is_valid_alias
 from services.avatar_service import (
-    build_avatar_preview,
     get_avatar_source,
     get_effective_avatar,
     invalidate_avatar_cache,
@@ -419,11 +418,9 @@ async def _consume_profile_avatar_upload(update: Update, context: CallbackContex
         avatar_path = save_custom_avatar(db_user["id"], payload or b"", CUSTOM_AVATAR_DIR)
         invalidate_avatar_cache(db_user["id"], AVATAR_CACHE_DIR)
         invalidate_leaderboard_cache()
+        logger.info("profile avatar saved user_id=%s path=%s", db_user["id"], avatar_path)
         context.user_data.pop("awaiting_profile_avatar", None)
-        await message.reply_text("✅ Кастомный аватар сохранён и применён.")
-        preview = build_avatar_preview(str(avatar_path))
-        if preview:
-            await message.reply_photo(photo=preview, caption="Превью нового аватара")
+        await _render_profile_view(message, context, db_user, int(update.effective_user.id), notice="✅ Кастомный аватар сохранён и применён.")
     except Exception:
         logger.exception("avatar upload failed user_id=%s", db_user.get("id"))
         await message.reply_text("❌ Не удалось сохранить аватар. Попробуй ещё раз.")
@@ -562,7 +559,16 @@ def is_allowed_when_expired_menu(text: str) -> bool:
 
 
 def is_allowed_when_expired_callback(data: str) -> bool:
-    return data in {"subscription_info", "subscription_info_photo", "account_info", "back"}
+    return data in {
+        "subscription_info",
+        "subscription_info_photo",
+        "account_info",
+        "profile_change_name",
+        "profile_avatar_upload",
+        "profile_avatar_reset",
+        "profile_change_rank_prefix",
+        "back",
+    }
 
 
 def activate_subscription_days(user_id: int, days: int) -> datetime:
@@ -812,6 +818,8 @@ MENU_FAQ = "❓ FAQ"
 MENU_PRICE = "💰 Прайс"
 MENU_CALENDAR = "🗓️ Календарь"
 MENU_ACCOUNT = "👤 Профиль"
+
+RANK_PREFIX_MAX_LENGTH = 20
 
 TOOLS_PRICE = "💰 Прайс"
 TOOLS_CALENDAR = "🗓️ Календарь"
@@ -2088,20 +2096,21 @@ async def handle_message(update: Update, context: CallbackContext):
         rank_prefix = " ".join(text.strip().split())
         if rank_prefix == "-":
             rank_prefix = ""
-        if len(rank_prefix) > 24:
-            rank_prefix = rank_prefix[:24].rstrip()
+        if len(rank_prefix) > RANK_PREFIX_MAX_LENGTH:
+            rank_prefix = rank_prefix[:RANK_PREFIX_MAX_LENGTH].rstrip()
         db_user = DatabaseManager.get_user(user.id)
         if not db_user:
             context.user_data.pop("awaiting_profile_rank_prefix", None)
             await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
             return
+        if not rank_prefix:
+            await update.message.reply_text("❌ Префикс не может быть пустым. Введите текст до 20 символов.")
+            return
         DatabaseManager.set_rank_prefix(db_user["id"], rank_prefix)
+        logger.info("profile rank prefix updated user_id=%s prefix=%s", db_user["id"], rank_prefix)
         context.user_data.pop("awaiting_profile_rank_prefix", None)
         invalidate_leaderboard_cache()
-        await update.message.reply_text(
-            f"✅ Префикс ранга обновлён: {rank_prefix or '—'}",
-            reply_markup=create_main_reply_keyboard(bool(DatabaseManager.get_active_shift(db_user['id'])), is_subscription_active(db_user)),
-        )
+        await _render_profile_view(update.message, context, db_user, user.id, notice=f"✅ Префикс ранга обновлён: {rank_prefix}")
         return
 
     awaiting_combo_name = context.user_data.get("awaiting_combo_name")
@@ -3447,6 +3456,40 @@ async def subscription_message(update: Update, context: CallbackContext):
     )
 
 
+def _clear_profile_waiting_flags(context: CallbackContext) -> None:
+    context.user_data.pop("awaiting_profile_name", None)
+    context.user_data.pop("awaiting_profile_avatar", None)
+    context.user_data.pop("awaiting_profile_rank_prefix", None)
+
+
+async def _render_profile_view(message, context: CallbackContext, db_user: dict, telegram_id: int, notice: str = "") -> None:
+    logger.info("profile renderer selected=unified user_id=%s", db_user.get("id"))
+    profile_text = build_profile_text(db_user, telegram_id)
+    if notice:
+        profile_text = f"{profile_text}\n\n{notice}"
+    profile_keyboard = build_profile_keyboard(db_user, telegram_id)
+    avatar = get_effective_avatar(db_user["id"])
+    if avatar:
+        await message.reply_photo(photo=Path(avatar).read_bytes(), caption=profile_text[:1024], reply_markup=profile_keyboard)
+        return
+    await send_text_with_optional_photo(message, context, profile_text, reply_markup=profile_keyboard, section="profile")
+
+
+async def _show_unified_profile_from_callback(query, context: CallbackContext, notice: str = "") -> None:
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Пользователь не найден")
+        return
+    _clear_profile_waiting_flags(context)
+    try:
+        await query.delete_message()
+    except Exception:
+        pass
+    await _render_profile_view(query.message, context, db_user, query.from_user.id, notice=notice)
+
+
+
+
 def build_profile_text(db_user: dict, telegram_id: int) -> str:
     expires_at = subscription_expires_at_for_user(db_user)
     expires_text = format_subscription_until(expires_at) if expires_at else "—"
@@ -3481,10 +3524,12 @@ def build_profile_keyboard(db_user: dict, telegram_id: int) -> InlineKeyboardMar
 
 
 async def profile_change_name_callback(query, context):
+    logger.info("profile callback invoked action=profile_change_name user_id=%s", query.from_user.id)
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         await query.edit_message_text("❌ Пользователь не найден")
         return
+    _clear_profile_waiting_flags(context)
     context.user_data["awaiting_profile_name"] = True
     prompt = "Введи новое имя для профиля и leaderboard (до 32 символов)."
     try:
@@ -3494,47 +3539,40 @@ async def profile_change_name_callback(query, context):
 
 
 async def profile_avatar_upload_callback(query, context):
+    logger.info("profile callback invoked action=profile_avatar_upload user_id=%s", query.from_user.id)
+    _clear_profile_waiting_flags(context)
     context.user_data["awaiting_profile_avatar"] = True
     await query.edit_message_text(
         "Отправь фото или файл-картинку одним сообщением — сохраним как кастомный аватар.\n"
         "Поддерживаются JPG/PNG/WebP до 10 МБ."
     )
+    logger.info("profile avatar mode enabled user_id=%s", query.from_user.id)
 
 
 async def profile_avatar_reset_callback(query, context):
+    logger.info("profile callback invoked action=profile_avatar_reset user_id=%s", query.from_user.id)
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         await query.edit_message_text("❌ Пользователь не найден")
         return
     source = reset_avatar(db_user["id"], CUSTOM_AVATAR_DIR)
+    logger.info("profile avatar reset user_id=%s source=%s", db_user["id"], source)
     invalidate_leaderboard_cache()
-    context.user_data.pop("awaiting_profile_avatar", None)
-    text = build_profile_text(db_user, query.from_user.id) + f"\n\n♻️ Аватар сброшен. Текущий источник: {source}."
-    kb = build_profile_keyboard(db_user, query.from_user.id)
-    avatar = get_effective_avatar(db_user["id"])
-    try:
-        if avatar:
-            await query.edit_message_media(
-                media=InputMediaPhoto(media=Path(avatar).read_bytes(), caption=text[:1024]),
-                reply_markup=kb,
-            )
-        else:
-            await query.edit_message_text(text, reply_markup=kb)
-    except Exception:
-        await query.message.reply_text(text, reply_markup=kb)
+    await _show_unified_profile_from_callback(query, context, notice=f"♻️ Аватар сброшен. Текущий источник: {source}.")
 
 
 
 
 async def profile_change_rank_prefix_callback(query, context):
+    logger.info("profile callback invoked action=profile_change_rank_prefix user_id=%s", query.from_user.id)
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         await query.edit_message_text("❌ Пользователь не найден")
         return
+    _clear_profile_waiting_flags(context)
     context.user_data["awaiting_profile_rank_prefix"] = True
     await query.edit_message_text(
-        "Введи новый префикс ранга (любой текст до 24 символов).\n"
-        "Чтобы очистить префикс — отправь: -"
+        f"Введи новый префикс ранга (любой текст до {RANK_PREFIX_MAX_LENGTH} символов)."
     )
 
 
@@ -3576,45 +3614,13 @@ async def account_message(update: Update, context: CallbackContext):
     if not db_user:
         await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
         return
-
-    text = build_profile_text(db_user, update.effective_user.id)
-    kb = build_profile_keyboard(db_user, update.effective_user.id)
-    avatar = get_effective_avatar(db_user["id"])
-    if avatar:
-        await update.message.reply_photo(photo=Path(avatar).read_bytes(), caption=text[:1024], reply_markup=kb)
-    else:
-        await send_text_with_optional_photo(update.message, context, text, reply_markup=kb, section="profile")
+    _clear_profile_waiting_flags(context)
+    await _render_profile_view(update.message, context, db_user, update.effective_user.id)
 
 
 async def account_info_callback(query, context):
-    db_user = DatabaseManager.get_user(query.from_user.id)
-    if not db_user:
-        await query.edit_message_text("❌ Пользователь не найден")
-        return
-
-    profile_text = build_profile_text(db_user, query.from_user.id)
-    profile_keyboard = build_profile_keyboard(db_user, query.from_user.id)
-    avatar = get_effective_avatar(db_user["id"])
-    profile_photo = avatar if avatar else get_section_photo_file_id("profile")
-
-    if profile_photo:
-        try:
-            await query.edit_message_media(
-                media=InputMediaPhoto(media=Path(profile_photo).read_bytes() if Path(str(profile_photo)).exists() else profile_photo, caption=profile_text[:1024]),
-                reply_markup=profile_keyboard,
-            )
-            return
-        except Exception:
-            await send_text_with_optional_photo(
-                query.message,
-                context,
-                profile_text,
-                reply_markup=profile_keyboard,
-                section="profile",
-            )
-            return
-
-    await query.edit_message_text(profile_text, reply_markup=profile_keyboard)
+    logger.info("profile callback invoked action=account_info user_id=%s", query.from_user.id)
+    await _show_unified_profile_from_callback(query, context)
 
 
 async def subscription_info_callback(query, context):

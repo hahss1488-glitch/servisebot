@@ -58,3 +58,43 @@ def test_render_with_incomplete_top(tmp_path, monkeypatch):
     payload = {"period_text": "1–10 МАРТА", "updated_text": "06.03.2026 06:24 МСК", "leaders": [{"place": 1, "name": "A", "amount": "100 ₽", "rank_prefix": "ЛЕГЕНДА", "avatar_path": ""}]}
     out = lr.render_leaderboard(payload)
     assert out.exists()
+
+
+def test_render_cache_reused_for_same_payload(tmp_path, monkeypatch):
+    tpl = tmp_path / "leaderboard_template_v2.png"
+    Image.new("RGBA", (1024, 1536), (20, 20, 20, 255)).save(tpl)
+    monkeypatch.setattr(lr, "LEADERBOARD_TEMPLATE_PATH", tpl)
+    monkeypatch.setattr(lr, "CACHE_DIR", tmp_path / "cache")
+    payload = _payload()
+    one = lr.render_leaderboard(payload)
+    two = lr.render_leaderboard(payload)
+    assert one == two
+
+
+def test_render_cache_changes_when_avatar_path_changes(tmp_path, monkeypatch):
+    tpl = tmp_path / "leaderboard_template_v2.png"
+    Image.new("RGBA", (1024, 1536), (20, 20, 20, 255)).save(tpl)
+    monkeypatch.setattr(lr, "LEADERBOARD_TEMPLATE_PATH", tpl)
+    monkeypatch.setattr(lr, "CACHE_DIR", tmp_path / "cache")
+
+    a1 = tmp_path / "a1.jpg"
+    a2 = tmp_path / "a2.jpg"
+    Image.new("RGB", (32, 32), "red").save(a1)
+    Image.new("RGB", (32, 32), "blue").save(a2)
+
+    payload = _payload()
+    payload["leaders"][0]["avatar_path"] = str(a1)
+    out1 = lr.render_leaderboard(payload)
+
+    payload2 = _payload()
+    payload2["leaders"][0]["avatar_path"] = str(a2)
+    out2 = lr.render_leaderboard(payload2)
+
+    assert out1 != out2
+
+
+def test_fit_text_to_width_ellipsis_for_long_text():
+    canvas = Image.new("RGBA", (300, 120), (0, 0, 0, 255))
+    draw = lr.ImageDraw.Draw(canvas)
+    text, _font = lr.fit_text_to_width(draw, "ОченьОченьОченьОченьОченьДлинноеИмя", 90, 36, 16, "bold")
+    assert text.endswith("…") or len(text) < len("ОченьОченьОченьОченьОченьДлинноеИмя")

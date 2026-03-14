@@ -95,7 +95,7 @@ def payload_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(serialize_payload(payload).encode("utf-8")).hexdigest()
 
 
-def _fit_text_to_width(
+def fit_text_to_width(
     draw: ImageDraw.ImageDraw,
     text: str,
     max_width: int,
@@ -163,8 +163,9 @@ def _avatar_circle(image: Image.Image, center: tuple[int, int], avatar: Image.Im
 
 
 def load_template() -> Image.Image | None:
-    logger.info("leaderboard template load path=%s", LEADERBOARD_TEMPLATE_PATH)
-    if LEADERBOARD_TEMPLATE_PATH.exists() and LEADERBOARD_TEMPLATE_PATH.is_file():
+    exists = LEADERBOARD_TEMPLATE_PATH.exists() and LEADERBOARD_TEMPLATE_PATH.is_file()
+    logger.info("leaderboard template load path=%s exists=%s", LEADERBOARD_TEMPLATE_PATH.resolve(), exists)
+    if exists:
         try:
             return Image.open(LEADERBOARD_TEMPLATE_PATH).convert("RGBA")
         except OSError:
@@ -207,7 +208,7 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
 
     draw = ImageDraw.Draw(canvas)
     period = str(payload.get("period_text") or "")
-    period_text, period_font = _fit_text_to_width(draw, period, LAYOUT.period_box[2], 36, 30, "bold")
+    period_text, period_font = fit_text_to_width(draw, period, LAYOUT.period_box[2], 36, 30, "bold")
     draw.text(
         (LAYOUT.period_box[0] + LAYOUT.period_box[2] // 2, LAYOUT.period_box[1] + LAYOUT.period_box[3] // 2),
         period_text,
@@ -229,23 +230,23 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
         rank_text = str(row.get("rank_prefix") or row.get("rank_text") or "—")
         rank_color = RANK_COLORS.get(place, (242, 245, 255, 255))
         rank_start_size = 26 if place in (1, 3) else 28
-        rank_value, rank_font = _fit_text_to_width(draw, rank_text, rank_box[2], rank_start_size, 22, "bold")
+        rank_value, rank_font = fit_text_to_width(draw, rank_text, rank_box[2], rank_start_size, 22, "bold")
         draw.text((rank_box[0] + rank_box[2] // 2, rank_box[1] + rank_box[3] // 2), rank_value, fill=rank_color, font=rank_font, anchor="mm")
 
         name_slot = LAYOUT.name_slots[place]
         name = str(row.get("name") or "—")
         if place == 1:
-            name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 58, 40, "extrabold")
+            name_text, name_font = fit_text_to_width(draw, name, name_slot.max_width, 58, 40, "extrabold")
         elif place == 2:
-            name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 44, 34, "extrabold")
+            name_text, name_font = fit_text_to_width(draw, name, name_slot.max_width, 44, 34, "extrabold")
         else:
-            name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 50, 38, "extrabold")
+            name_text, name_font = fit_text_to_width(draw, name, name_slot.max_width, 50, 38, "extrabold")
         draw.text(name_slot.xy, name_text, fill=(255, 255, 255, 255), font=name_font)
 
         amount_box = LAYOUT.amount_slots[place]
         amount = str(row.get("amount") or format_money_rub(int(row.get("total_amount") or 0)))
         amount_start_size = {1: 48, 2: 44, 3: 42}[place]
-        amount_text, amount_font = _fit_text_to_width(draw, amount, amount_box[2], amount_start_size, 30, "extrabold")
+        amount_text, amount_font = fit_text_to_width(draw, amount, amount_box[2], amount_start_size, 30, "extrabold")
         draw.text(
             (amount_box[0] + amount_box[2] // 2, amount_box[1] + amount_box[3] // 2),
             amount_text,
@@ -258,15 +259,15 @@ def render_leaderboard(payload: dict[str, Any]) -> Path:
         row = by_place.get(place, {})
         name_slot = LAYOUT.tail_name_slots[place]
         name = str(row.get("name") or "—")
-        name_text, name_font = _fit_text_to_width(draw, name, name_slot.max_width, 36, 30, "bold")
+        name_text, name_font = fit_text_to_width(draw, name, name_slot.max_width, 36, 30, "bold")
         draw.text(name_slot.xy, name_text, fill=(232, 237, 255, 255), font=name_font)
 
         amount = str(row.get("amount") or format_money_rub(int(row.get("total_amount") or 0)))
-        amount_text, amount_font = _fit_text_to_width(draw, amount, 260, 36, 30, "extrabold")
+        amount_text, amount_font = fit_text_to_width(draw, amount, 260, 36, 30, "extrabold")
         draw.text((LAYOUT.tail_amount_right_x, name_slot.xy[1]), amount_text, fill=(255, 255, 255, 255), font=amount_font, anchor="ra")
 
     updated_text = _format_updated_text(payload.get("updated_text"))
-    fitted_updated, updated_font = _fit_text_to_width(draw, updated_text, LAYOUT.updated_slot.max_width, 30, 24, "semibold")
+    fitted_updated, updated_font = fit_text_to_width(draw, updated_text, LAYOUT.updated_slot.max_width, 30, 24, "semibold")
     draw.text(LAYOUT.updated_slot.xy, fitted_updated, fill=(215, 221, 242, 255), font=updated_font)
 
     canvas.save(out_path)

@@ -22,6 +22,17 @@ RANK_PREFIX_DEFAULTS = {
     2: "PRO",
     3: "ELITE",
 }
+RANK_PREFIX_FALLBACK = "НОВИЧОК"
+RANK_PREFIX_MAX_LENGTH = 20
+
+
+def sanitize_rank_prefix(raw: Any, place: int) -> str:
+    value = " ".join(str(raw or "").strip().split())
+    if value.startswith("👤") or value.lower() == "профиль":
+        value = ""
+    if len(value) > RANK_PREFIX_MAX_LENGTH:
+        value = value[:RANK_PREFIX_MAX_LENGTH].rstrip()
+    return value or RANK_PREFIX_DEFAULTS.get(place, RANK_PREFIX_FALLBACK)
 
 
 def format_money(v: Any) -> str:
@@ -65,7 +76,7 @@ def _leaderboard_payload(decade_title: str, decade_leaders: list[dict], updated_
         if i <= 3:
             row.update(
                 {
-                    "rank_prefix": str(src.get("rank_prefix") or src.get("rank_text") or RANK_PREFIX_DEFAULTS[i]),
+                    "rank_prefix": sanitize_rank_prefix(src.get("rank_prefix") or src.get("rank_text"), i),
                     "avatar_path": str(src.get("avatar_path") or ""),
                 }
             )
