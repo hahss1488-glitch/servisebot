@@ -43,6 +43,9 @@ from config import BOT_TOKEN, SERVICES, validate_car_number
 from database import DatabaseManager, init_database, DB_PATH
 from exports import create_decade_pdf, create_decade_xlsx, create_month_xlsx
 from services.planning import compute_plan_metrics
+from services.dashboard_state_service import DashboardStateService
+from services.fast_input_service import parse_fast_input
+from services.avatar_service import save_custom_avatar, get_effective_avatar, reset_avatar, build_avatar_preview
 from ui.nav import push_screen, pop_screen, get_current_screen, Screen
 from ui.premium_renderer import TOKENS, format_money as format_money_glass, render_dashboard_image_bytes, render_leaderboard_image_bytes
 
@@ -329,20 +332,7 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 
 def resolve_user_avatar_path(user_id: int) -> str:
-    settings = DatabaseManager.get_avatar_settings(user_id)
-    source = settings.get("avatar_source", "telegram")
-    custom = settings.get("custom_avatar_path", "")
-    tg = settings.get("telegram_avatar_path", "")
-    if source == "custom" and custom:
-        p = Path(custom)
-        if p.exists() and p.is_file() and p.stat().st_size > 32:
-            return custom
-        DatabaseManager.reset_avatar_source(user_id)
-    if tg:
-        tp = Path(tg)
-        if tp.exists() and tp.is_file() and tp.stat().st_size > 32:
-            return tg
-    return ""
+    return get_effective_avatar(user_id)
 
 
 async def _refresh_telegram_avatar_cache(context: CallbackContext, telegram_id: int, user_id: int) -> str:
@@ -414,17 +404,12 @@ async def _consume_profile_avatar_upload(update: Update, context: CallbackContex
         return True
 
     try:
-        CUSTOM_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
-        avatar_path = CUSTOM_AVATAR_DIR / f"{db_user['id']}.jpg"
-        with Image.open(BytesIO(payload)) as src:
-            image = src.convert("RGB")
-            image.thumbnail((768, 768), Image.Resampling.LANCZOS)
-            canvas = Image.new("RGB", image.size, "#101826")
-            canvas.paste(image, (0, 0))
-            canvas.save(avatar_path, format="JPEG", quality=90, optimize=True)
-        DatabaseManager.set_custom_avatar(db_user["id"], str(avatar_path))
+        avatar_path = save_custom_avatar(db_user["id"], payload or b"", CUSTOM_AVATAR_DIR)
         context.user_data.pop("awaiting_profile_avatar", None)
         await message.reply_text("✅ Кастомный аватар сохранён и применён.")
+        preview = build_avatar_preview(str(avatar_path))
+        if preview:
+            await message.reply_photo(photo=preview, caption="Превью нового аватара")
     except Exception:
         logger.exception("avatar upload failed user_id=%s", db_user.get("id"))
         await message.reply_text("❌ Не удалось сохранить аватар. Попробуй ещё раз.")
@@ -938,15 +923,9 @@ def create_services_keyboard(
 
     keyboard = []
 
-    combos = DatabaseManager.get_user_combos(user_id) if user_id else []
-    if combos:
-        top_combo = combos[0]
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🧩 {top_combo['name'][:28]}",
-                callback_data=f"combo_apply_{top_combo['id']}_{car_id}_{page}",
-            )
-        ])
+    keyboard.append([
+        InlineKeyboardButton("🧩 Комбо", callback_data=f"combo_menu_{car_id}_{page}_0")
+    ])
 
     keyboard.extend(chunk_buttons(buttons, 3))
 
@@ -1427,36 +1406,16 @@ def get_goal_text(user_id: int) -> str:
     if not DatabaseManager.is_goal_enabled(user_id):
         return ""
 
-    db_user = DatabaseManager.get_user_by_id(user_id)
-    if not db_user:
+    snapshot = DashboardStateService.build_snapshot(user_id)
+    if snapshot.decade_goal <= 0:
         return ""
 
-    active_shift = DatabaseManager.get_active_shift(user_id)
-    shift_total = DatabaseManager.get_shift_total(active_shift["id"]) if active_shift else 0
-
-    p = calculate_current_decade_shift_plan(db_user)
-    shift_target_now = int(p["shift_target_now"])
-    decade_plan_total = int(p["decade_goal"])
-    shift_target = int(active_shift.get("shift_target") or 0) if active_shift else shift_target_now
-
-    logger.debug(
-        "pinned planning metrics user_id=%s work_units_total=%s work_units_left=%s remaining=%s shift_target=%s avg_per_shift=%s shift_id=%s",
-        user_id,
-        p["work_units_total"],
-        p["work_units_left"],
-        p["remaining"],
-        shift_target,
-        p["avg_per_shift"],
-        active_shift["id"] if active_shift else 0,
-    )
-
-    if decade_plan_total <= 0:
-        return ""
-    percent = 100 if shift_target == 0 else calculate_percent(int(shift_total), shift_target)
+    shift_target = snapshot.active_shift_target or snapshot.needed_per_shift
+    percent = 100 if shift_target == 0 else calculate_percent(int(snapshot.active_shift_revenue), int(shift_target))
     bar = render_bar(percent, 10)
-    if not active_shift:
+    if snapshot.status != "Смена активна":
         return f"Цель смены: {format_money(0)} / {format_money(shift_target)}\nСмена не открыта {bar}"
-    return f"Цель смены: {format_money(int(shift_total))} / {format_money(shift_target)} {bar}"
+    return f"Цель смены: {format_money(int(snapshot.active_shift_revenue))} / {format_money(shift_target)} {bar}"
 
 
 def calculate_current_decade_shift_target(db_user: dict) -> int:
@@ -1883,6 +1842,82 @@ async def handle_message(update: Update, context: CallbackContext):
         await update.message.reply_text("⛔ Доступ к боту закрыт администратором.")
         return
 
+    # Быстрый ввод: "номер + alias комбо/услуг"
+    if db_user_for_access and subscription_active:
+        active_shift = DatabaseManager.get_active_shift(db_user_for_access['id'])
+        if active_shift:
+            parsed = parse_fast_input(text, db_user_for_access['id'], FAST_SERVICE_ALIASES)
+            if parsed.car_number and parsed.service_ids:
+                car_id = DatabaseManager.add_car(active_shift['id'], parsed.car_number)
+                mode = get_price_mode(context, db_user_for_access["id"])
+                total_qty = 0
+                for sid in parsed.service_ids:
+                    service = SERVICES.get(int(sid))
+                    if not service or service.get('kind') in {'group', 'distance'}:
+                        continue
+                    DatabaseManager.add_service_to_car(
+                        car_id,
+                        int(sid),
+                        plain_service_name(service['name']),
+                        get_current_price(int(sid), mode),
+                    )
+                    total_qty += 1
+
+                car = DatabaseManager.get_car(car_id)
+                note = f"\nНе распознано: {', '.join(parsed.unknown_tokens)}" if parsed.unknown_tokens else ""
+                await update.message.reply_text(
+                    f"🚗 Быстро добавлено: {parsed.car_number}\n"
+                    f"Услуг: {total_qty}\n"
+                    f"Сумма: {format_money(int(car['total_amount']) if car else 0)}{note}"
+                )
+                try:
+                    await send_goal_status(update, context, db_user_for_access['id'])
+                except Exception:
+                    logger.exception("send_goal_status failed in fast add for user_id=%s", db_user_for_access.get("id"))
+                return
+            if parsed.car_number and not parsed.service_ids and len(text.split()) > 1:
+                detail = f"\nНераспознанные токены: {', '.join(parsed.unknown_tokens)}" if parsed.unknown_tokens else ""
+                await update.message.reply_text(f"❌ {parsed.error_message}{detail}")
+                return
+
+    if is_admin_telegram(user.id) and db_user_for_access:
+        section = context.user_data.get("awaiting_admin_section_photo")
+        if section:
+            photo = update.message.photo[-1] if update.message.photo else None
+            if not photo:
+                await update.message.reply_text("Пришлите фото (изображение).")
+                return
+            set_section_photo_file_id(section, photo.file_id)
+            context.user_data.pop("awaiting_admin_section_photo", None)
+            await update.message.reply_text("✅ Фото сохранено для раздела.")
+            return
+
+        if context.user_data.get("awaiting_admin_faq_video") and update.message.video:
+            video = update.message.video
+            DatabaseManager.set_app_content("faq_video_file_id", video.file_id)
+            DatabaseManager.set_app_content("faq_video_source_chat_id", str(update.message.chat_id))
+            DatabaseManager.set_app_content("faq_video_source_message_id", str(update.message.message_id))
+            context.user_data.pop("awaiting_admin_faq_video", None)
+            await update.message.reply_text("✅ Видео FAQ обновлено. Пользователи будут получать его как полноценное видео.")
+            return
+
+    if db_user_for_access and await _consume_profile_avatar_upload(update, context, db_user_for_access):
+        return
+
+
+async def handle_message(update: Update, context: CallbackContext):
+    """Обработка текстовых сообщений"""
+    user = update.effective_user
+    text = (update.message.text or "").strip()
+    db_user_for_access, blocked, subscription_active = resolve_user_access(user.id, context)
+    if not db_user_for_access:
+        db_user_for_access = ensure_db_user(user)
+        if db_user_for_access:
+            subscription_active = is_subscription_active(db_user_for_access)
+    if blocked:
+        await update.message.reply_text("⛔ Доступ к боту закрыт администратором.")
+        return
+
     # Быстрый ввод: "номер + сокращения услуг"
     if db_user_for_access and subscription_active:
         active_shift = DatabaseManager.get_active_shift(db_user_for_access['id'])
@@ -2081,8 +2116,8 @@ async def handle_message(update: Update, context: CallbackContext):
 
     awaiting_combo_name = context.user_data.get("awaiting_combo_name")
     if awaiting_combo_name:
-        name = text.strip()
-        if not name:
+        raw = text.strip()
+        if not raw:
             await update.message.reply_text("Название не может быть пустым")
             return
         db_user = DatabaseManager.get_user(user.id)
@@ -2094,9 +2129,25 @@ async def handle_message(update: Update, context: CallbackContext):
             context.user_data.pop("awaiting_combo_name", None)
             await update.message.reply_text("❌ Список услуг пуст, начните заново.")
             return
-        DatabaseManager.save_user_combo(db_user['id'], name, service_ids)
+
+        if "|" in raw:
+            name, combo_alias = [x.strip() for x in raw.split("|", 1)]
+        else:
+            name, combo_alias = raw, ""
+        combo_alias = combo_alias.lower()
+        if combo_alias:
+            if DatabaseManager.is_combo_alias_taken(db_user['id'], combo_alias):
+                await update.message.reply_text("❌ Такой alias комбо уже существует.")
+                return
+            for aliases in FAST_SERVICE_ALIASES.values():
+                if combo_alias in aliases:
+                    await update.message.reply_text("❌ Alias комбо конфликтует с alias услуги.")
+                    return
+
+        DatabaseManager.save_user_combo(db_user['id'], name, service_ids, alias=combo_alias)
         context.user_data.pop("awaiting_combo_name", None)
-        await update.message.reply_text(f"✅ Комбо «{name}» сохранено")
+        suffix = f" (alias: {combo_alias})" if combo_alias else ""
+        await update.message.reply_text(f"✅ Комбо «{name}» сохранено{suffix}")
         return
 
     if context.user_data.get('awaiting_service_search'):
@@ -3370,6 +3421,7 @@ def build_profile_text(db_user: dict, telegram_id: int) -> str:
     avatar_meta = DatabaseManager.get_avatar_settings(db_user["id"])
     source_map = {"custom": "кастомный", "telegram": "Telegram/дефолт"}
     avatar_source = source_map.get(avatar_meta.get("avatar_source", "telegram"), "Telegram/дефолт")
+    avatar_path = get_effective_avatar(db_user["id"])
     return (
         f"👤 Профиль: {db_user.get('name', 'Пользователь')}\n"
         f"ID: {telegram_id}\n\n"
@@ -3417,7 +3469,7 @@ async def profile_avatar_reset_callback(query, context):
     if not db_user:
         await query.edit_message_text("❌ Пользователь не найден")
         return
-    DatabaseManager.reset_avatar_source(db_user["id"])
+    reset_avatar(db_user["id"])
     context.user_data.pop("awaiting_profile_avatar", None)
     text = build_profile_text(db_user, query.from_user.id)
     kb = build_profile_keyboard(db_user, query.from_user.id)
@@ -3463,13 +3515,13 @@ async def account_message(update: Update, context: CallbackContext):
         await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
         return
 
-    await send_text_with_optional_photo(
-        update.message,
-        context,
-        build_profile_text(db_user, update.effective_user.id),
-        reply_markup=build_profile_keyboard(db_user, update.effective_user.id),
-        section="profile",
-    )
+    text = build_profile_text(db_user, update.effective_user.id)
+    kb = build_profile_keyboard(db_user, update.effective_user.id)
+    avatar = get_effective_avatar(db_user["id"])
+    if avatar:
+        await update.message.reply_photo(photo=Path(avatar).read_bytes(), caption=text[:1024], reply_markup=kb)
+    else:
+        await send_text_with_optional_photo(update.message, context, text, reply_markup=kb, section="profile")
 
 
 async def account_info_callback(query, context):
@@ -3480,12 +3532,13 @@ async def account_info_callback(query, context):
 
     profile_text = build_profile_text(db_user, query.from_user.id)
     profile_keyboard = build_profile_keyboard(db_user, query.from_user.id)
-    profile_photo = get_section_photo_file_id("profile")
+    avatar = get_effective_avatar(db_user["id"])
+    profile_photo = avatar if avatar else get_section_photo_file_id("profile")
 
     if profile_photo:
         try:
             await query.edit_message_media(
-                media=InputMediaPhoto(media=profile_photo, caption=profile_text[:1024]),
+                media=InputMediaPhoto(media=Path(profile_photo).read_bytes() if Path(str(profile_photo)).exists() else profile_photo, caption=profile_text[:1024]),
                 reply_markup=profile_keyboard,
             )
             return
@@ -4195,18 +4248,31 @@ async def show_combo_menu(query, context, data):
         return
     car_id = int(parts[2])
     page = int(parts[3])
+    combo_page = int(parts[4]) if len(parts) > 4 else 0
 
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         await query.edit_message_text("❌ Пользователь не найден")
         return
 
-    combos = DatabaseManager.get_user_combos(db_user['id'])
+    all_combos = DatabaseManager.get_user_combos(db_user['id'])
+    combos = []
+    for combo in all_combos:
+        try:
+            combos.append(combo)
+        except (TypeError, KeyError):
+            logger.warning("broken combo row user_id=%s combo=%s", db_user['id'], combo)
+    per_page = 8
+    max_page = max((len(combos) - 1) // per_page, 0)
+    combo_page = max(0, min(combo_page, max_page))
+    current = combos[combo_page * per_page:(combo_page + 1) * per_page]
+
     keyboard = []
-    for combo in combos:
+    for combo in current:
+        alias = f" ({combo.get('alias')})" if combo.get('alias') else ""
         keyboard.append([
             InlineKeyboardButton(
-                f"▶️ {combo['name']}",
+                f"▶️ {combo['name'][:24]}{alias}",
                 callback_data=f"combo_apply_{combo['id']}_{car_id}_{page}",
             ),
             InlineKeyboardButton(
@@ -4215,8 +4281,18 @@ async def show_combo_menu(query, context, data):
             ),
         ])
 
+    nav = []
+    if combo_page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"combo_menu_{car_id}_{page}_{combo_page-1}"))
+    nav.append(InlineKeyboardButton(f"{combo_page+1}/{max_page+1}", callback_data="noop"))
+    if combo_page < max_page:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"combo_menu_{car_id}_{page}_{combo_page+1}"))
+    if nav:
+        keyboard.append(nav)
+
     keyboard.append([InlineKeyboardButton("⬅️ К услугам", callback_data=f"back_to_services_{car_id}_{page}")])
     text_msg = "🧩 У вас пока нет сохранённых комбо.\nСоздайте их в настройках: «Мои комбинации»." if not combos else "🧩 Выберите комбинацию для применения:"
+    logger.info("combo list user_id=%s total=%s page=%s", db_user['id'], len(combos), combo_page)
     await query.edit_message_text(text_msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -4703,10 +4779,13 @@ def build_dashboard_image_bytes_closed(payload: dict) -> BytesIO | None:
 
 
 async def build_dashboard_image_cached(mode: str, user_id: int, payload: dict) -> BytesIO | None:
-    key = f"{mode}:{user_id}"
+    payload_key = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    key = f"{mode}:{user_id}:{hash(payload_key)}"
     cached = _cache_get(_DASHBOARD_CACHE, key)
     if cached is not None:
+        logger.info("dashboard cache hit user_id=%s mode=%s", user_id, mode)
         return cached
+    logger.info("dashboard cache miss user_id=%s mode=%s", user_id, mode)
     if mode == "open":
         image = await asyncio.to_thread(build_dashboard_image_bytes_open, payload)
     else:

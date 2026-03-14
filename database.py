@@ -104,6 +104,7 @@ def init_database():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         name TEXT NOT NULL,
+        alias TEXT DEFAULT '',
         service_ids TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -158,6 +159,11 @@ def init_database():
         WHERE date(work_date) <> date(start_time, '+3 hours')"""
     )
 
+    cur.execute("PRAGMA table_info(user_combos)")
+    combo_columns = {row[1] for row in cur.fetchall()}
+    if "alias" not in combo_columns:
+        cur.execute("ALTER TABLE user_combos ADD COLUMN alias TEXT DEFAULT ''")
+
     cur.execute("PRAGMA table_info(user_settings)")
     settings_columns = {row[1] for row in cur.fetchall()}
     if "broadcast_enabled" not in settings_columns:
@@ -176,6 +182,7 @@ def init_database():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_cars_shift_id ON cars(shift_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_car_services_car_id ON car_services(car_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_user_settings_user_id ON user_settings(user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_user_combos_user_alias ON user_combos(user_id, alias)")
 
     conn.commit()
     conn.close()
@@ -1463,12 +1470,12 @@ class DatabaseManager:
         return [dict(row) for row in rows]
 
     @staticmethod
-    def save_user_combo(user_id: int, name: str, service_ids: List[int]) -> int:
+    def save_user_combo(user_id: int, name: str, service_ids: List[int], alias: str = "") -> int:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO user_combos (user_id, name, service_ids) VALUES (?, ?, ?)",
-            (user_id, name, json.dumps(service_ids, ensure_ascii=False))
+            "INSERT INTO user_combos (user_id, name, alias, service_ids) VALUES (?, ?, ?, ?)",
+            (user_id, name, (alias or "").strip().lower(), json.dumps(service_ids, ensure_ascii=False))
         )
         combo_id = cur.lastrowid
         conn.commit()
@@ -1480,7 +1487,7 @@ class DatabaseManager:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            "SELECT * FROM user_combos WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+            "SELECT * FROM user_combos WHERE user_id = ? ORDER BY created_at DESC",
             (user_id,)
         )
         rows = cur.fetchall()
@@ -1494,6 +1501,43 @@ class DatabaseManager:
                 item["service_ids"] = []
             result.append(item)
         return result
+
+    @staticmethod
+    def get_combo_by_alias(user_id: int, combo_alias: str) -> Optional[Dict]:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM user_combos WHERE user_id = ? AND lower(alias) = ?",
+            (user_id, (combo_alias or "").strip().lower()),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        item = dict(row)
+        try:
+            item["service_ids"] = json.loads(item.get("service_ids") or "[]")
+        except json.JSONDecodeError:
+            item["service_ids"] = []
+        return item
+
+    @staticmethod
+    def is_combo_alias_taken(user_id: int, combo_alias: str, exclude_combo_id: int | None = None) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        if exclude_combo_id:
+            cur.execute(
+                "SELECT 1 FROM user_combos WHERE user_id = ? AND lower(alias) = ? AND id <> ? LIMIT 1",
+                (user_id, (combo_alias or "").strip().lower(), exclude_combo_id),
+            )
+        else:
+            cur.execute(
+                "SELECT 1 FROM user_combos WHERE user_id = ? AND lower(alias) = ? LIMIT 1",
+                (user_id, (combo_alias or "").strip().lower()),
+            )
+        row = cur.fetchone()
+        conn.close()
+        return bool(row)
 
     @staticmethod
     def get_combo(combo_id: int, user_id: int) -> Optional[Dict]:
@@ -1518,6 +1562,19 @@ class DatabaseManager:
         cur.execute(
             "UPDATE user_combos SET name = ? WHERE id = ? AND user_id = ?",
             (new_name, combo_id, user_id)
+        )
+        updated = cur.rowcount
+        conn.commit()
+        conn.close()
+        return bool(updated)
+
+    @staticmethod
+    def update_combo_alias(combo_id: int, user_id: int, new_alias: str) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE user_combos SET alias = ? WHERE id = ? AND user_id = ?",
+            ((new_alias or "").strip().lower(), combo_id, user_id)
         )
         updated = cur.rowcount
         conn.commit()
