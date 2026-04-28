@@ -178,6 +178,8 @@ def init_database():
         cur.execute("ALTER TABLE user_settings ADD COLUMN telegram_avatar_path TEXT DEFAULT ''")
     if "rank_prefix" not in settings_columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN rank_prefix TEXT DEFAULT ''")
+    if "is_admin" not in settings_columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN is_admin INTEGER DEFAULT 0")
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_status_start ON shifts(user_id, status, start_time)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shifts_work_date_user ON shifts(work_date, user_id)")
@@ -910,6 +912,43 @@ class DatabaseManager:
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET images_enabled = excluded.images_enabled""",
             (user_id, 1 if enabled else 0)
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def is_user_admin(user_id: int) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT is_admin FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        return bool(row and int(row["is_admin"] or 0) == 1)
+
+    @staticmethod
+    def is_telegram_admin(telegram_id: int) -> bool:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT COALESCE(us.is_admin, 0) AS is_admin
+            FROM users u
+            LEFT JOIN user_settings us ON us.user_id = u.id
+            WHERE u.telegram_id = ?""",
+            (telegram_id,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        return bool(row and int(row["is_admin"] or 0) == 1)
+
+    @staticmethod
+    def set_user_admin(user_id: int, is_admin: bool) -> None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO user_settings (user_id, is_admin)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET is_admin = excluded.is_admin""",
+            (user_id, 1 if is_admin else 0),
         )
         conn.commit()
         conn.close()

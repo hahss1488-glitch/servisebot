@@ -8,6 +8,7 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 import json
 import os
+import subprocess
 import calendar
 import re
 import importlib.util
@@ -66,6 +67,8 @@ APP_UPDATED_AT = "09.03.2026 07:40 (МСК)"
 APP_TIMEZONE = "Europe/Moscow"
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
 ADMIN_TELEGRAM_IDS = {8379101989}
+BOT_UPDATE_COMMAND = os.getenv("BOT_UPDATE_COMMAND", "updatebot")
+SERVER_REBOOT_COMMAND = os.getenv("SERVER_REBOOT_COMMAND", "sudo reboot")
 TRIAL_DAYS = 7
 SUBSCRIPTION_PRICE_TEXT = "200 ₽/месяц"
 SUBSCRIPTION_CONTACT = "@dakonoplev2"
@@ -445,7 +448,7 @@ def get_decade_period(target: date | None = None):
 
 
 def is_admin_telegram(telegram_id: int) -> bool:
-    return telegram_id in ADMIN_TELEGRAM_IDS
+    return telegram_id in ADMIN_TELEGRAM_IDS or DatabaseManager.is_telegram_admin(int(telegram_id))
 
 
 def is_user_banned_telegram(telegram_id: int) -> bool:
@@ -2388,6 +2391,9 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "admin_banned_users": admin_banned_users,
         "admin_subscriptions": admin_subscriptions,
         "admin_broadcast_menu": admin_broadcast_menu,
+        "admin_system_menu": admin_system_menu,
+        "admin_restart_bot": admin_restart_bot,
+        "admin_reboot_server": admin_reboot_server,
         "admin_broadcast_all": lambda q, c: admin_broadcast_prepare(q, c, "all"),
         "admin_broadcast_expiring_1d": lambda q, c: admin_broadcast_prepare(q, c, "expiring_1d"),
         "admin_broadcast_expired": lambda q, c: admin_broadcast_prepare(q, c, "expired"),
@@ -2522,6 +2528,7 @@ async def handle_callback(update: Update, context: CallbackContext):
         ("admin_activate_month_", admin_activate_month),
         ("admin_activate_days_prompt_", admin_activate_days_prompt),
         ("admin_disable_subscription_", admin_disable_subscription),
+        ("admin_toggle_admin_", admin_toggle_admin),
         ("admin_broadcast_user_", lambda q, c, d: admin_broadcast_prepare(q, c, d.replace("admin_broadcast_user_", ""))),
         ("admin_unban_", admin_unban_user),
         ("calendar_nav_", calendar_nav_callback),
@@ -2786,6 +2793,7 @@ async def admin_panel(query, context):
         [InlineKeyboardButton("🚫 Забаненные", callback_data="admin_banned_users")],
         [InlineKeyboardButton("💳 Подписки", callback_data="admin_subscriptions")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast_menu")],
+        [InlineKeyboardButton("🔁 Перезапуск и сервер", callback_data="admin_system_menu")],
         [InlineKeyboardButton("❓ Редактировать FAQ", callback_data="admin_faq_menu")],
         [InlineKeyboardButton("🖼 Медиа разделов", callback_data="admin_media_menu")],
         [InlineKeyboardButton("🔙 В настройки", callback_data="settings")],
@@ -2801,6 +2809,7 @@ async def send_admin_panel_for_message(update: Update):
         [InlineKeyboardButton("🚫 Забаненные", callback_data="admin_banned_users")],
         [InlineKeyboardButton("💳 Подписки", callback_data="admin_subscriptions")],
         [InlineKeyboardButton("📣 Рассылка", callback_data="admin_broadcast_menu")],
+        [InlineKeyboardButton("🔁 Перезапуск и сервер", callback_data="admin_system_menu")],
         [InlineKeyboardButton("❓ Редактировать FAQ", callback_data="admin_faq_menu")],
         [InlineKeyboardButton("🖼 Медиа разделов", callback_data="admin_media_menu")],
         [InlineKeyboardButton("🔙 В настройки", callback_data="settings")],
@@ -2890,9 +2899,11 @@ async def admin_user_card(query, context, data):
     blocked = bool(int(row.get("is_blocked", 0)))
     include_in_leaderboard = bool(int(row.get("include_in_leaderboard", 1)))
     include_in_broadcast = bool(int(row.get("broadcast_enabled", 1)))
+    is_target_admin = is_admin_telegram(int(row["telegram_id"]))
+    is_super_admin = int(row["telegram_id"]) in ADMIN_TELEGRAM_IDS
     target_user = DatabaseManager.get_user_by_id(user_id)
     expires = subscription_expires_at_for_user(target_user) if target_user else None
-    sub_status = "♾️ Админ" if is_admin_telegram(int(row["telegram_id"])) else (
+    sub_status = "♾️ Админ" if is_target_admin else (
         f"до {format_subscription_until(expires)}" if expires and now_local() <= expires else "истекла"
     )
     back_callback = context.user_data.get("admin_user_back", "admin_users")
@@ -2909,6 +2920,10 @@ async def admin_user_card(query, context, data):
         [InlineKeyboardButton("🗓️ Активировать на месяц", callback_data=f"admin_activate_month_{user_id}")],
         [InlineKeyboardButton("✍️ Активировать на N дней", callback_data=f"admin_activate_days_prompt_{user_id}")],
         [InlineKeyboardButton("🚫 Отключить подписку", callback_data=f"admin_disable_subscription_{user_id}")],
+        [InlineKeyboardButton(
+            "➖ Убрать права админа" if is_target_admin and not is_super_admin else "➕ Выдать права админа",
+            callback_data=f"admin_toggle_admin_{user_id}",
+        )],
         [InlineKeyboardButton("🔙 Назад", callback_data=back_callback)],
     ]
     await query.edit_message_text(
@@ -2917,9 +2932,67 @@ async def admin_user_card(query, context, data):
         f"Статус: {'Заблокирован' if blocked else 'Активен'}\n"
         f"Лидерборд: {'Учитывается' if include_in_leaderboard else 'Не учитывается'}\n"
         f"Рассылка: {'Получает' if include_in_broadcast else 'Отключена'}\n"
+        f"Роль: {'Админ' if is_target_admin else 'Пользователь'}\n"
         f"Подписка: {sub_status}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+async def admin_toggle_admin(query, context, data):
+    if not is_admin_telegram(query.from_user.id):
+        return
+    user_id = int(data.replace("admin_toggle_admin_", ""))
+    target_user = DatabaseManager.get_user_by_id(user_id)
+    if not target_user:
+        await query.answer("Пользователь не найден")
+        return
+
+    target_telegram_id = int(target_user["telegram_id"])
+    if target_telegram_id in ADMIN_TELEGRAM_IDS:
+        await query.answer("Нельзя изменить права владельца", show_alert=True)
+        return
+
+    current_state = DatabaseManager.is_user_admin(user_id)
+    DatabaseManager.set_user_admin(user_id, not current_state)
+    await query.answer("Права администратора обновлены")
+    await admin_user_card(query, context, f"admin_user_{user_id}")
+
+
+async def _spawn_shell_command(command: str) -> None:
+    subprocess.Popen(
+        ["bash", "-lc", f"sleep 1; {command}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+async def admin_system_menu(query, context):
+    if not is_admin_telegram(query.from_user.id):
+        await query.edit_message_text("⛔ Доступно только администратору")
+        return
+    keyboard = [
+        [InlineKeyboardButton("♻️ Обновить/перезапустить бота", callback_data="admin_restart_bot")],
+        [InlineKeyboardButton("🖥 Перезагрузить сервер", callback_data="admin_reboot_server")],
+        [InlineKeyboardButton("🔙 В админку", callback_data="admin_panel")],
+    ]
+    await query.edit_message_text("🔁 Системные действия:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def admin_restart_bot(query, context):
+    del context
+    if not is_admin_telegram(query.from_user.id):
+        return
+    await query.edit_message_text("♻️ Запускаю команду обновления бота. Это может занять до 1-2 минут.")
+    await _spawn_shell_command(BOT_UPDATE_COMMAND)
+
+
+async def admin_reboot_server(query, context):
+    del context
+    if not is_admin_telegram(query.from_user.id):
+        return
+    await query.edit_message_text("🖥 Отправляю команду перезагрузки сервера.")
+    await _spawn_shell_command(SERVER_REBOOT_COMMAND)
 
 
 async def admin_toggle_block(query, context, data):
