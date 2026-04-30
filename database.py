@@ -15,13 +15,18 @@ def now_local() -> datetime:
     return datetime.now(LOCAL_TZ)
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 def init_database():
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode = WAL")
+    cur.execute("PRAGMA synchronous = NORMAL")
+    cur.execute("PRAGMA temp_store = MEMORY")
     
     # Таблица пользователей
     cur.execute("""CREATE TABLE IF NOT EXISTS users (
