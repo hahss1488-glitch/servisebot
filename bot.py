@@ -10,16 +10,13 @@ import json
 import os
 import calendar
 import re
-import importlib.util
 import random
 from pathlib import Path
-from io import BytesIO
 from typing import Any, List
 import csv
 import shutil
 from dataclasses import dataclass
 
-from PIL import Image, UnidentifiedImageError
 
 from telegram import (
     Update,
@@ -27,7 +24,6 @@ from telegram import (
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
     KeyboardButton,
-    InputMediaPhoto,
 )
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -45,15 +41,7 @@ from exports import create_decade_pdf, create_decade_xlsx, create_month_xlsx
 from services.planning import compute_plan_metrics
 from services.dashboard_state_service import DashboardStateService
 from services.fast_input_service import parse_fast_input, normalize_alias, is_valid_alias
-from services.avatar_service import (
-    get_avatar_source,
-    get_effective_avatar,
-    invalidate_avatar_cache,
-    reset_avatar,
-    save_custom_avatar,
-)
 from ui.nav import push_screen, pop_screen, get_current_screen, Screen
-from ui.premium_renderer import TOKENS, format_money as format_money_glass, render_dashboard_image_bytes, render_leaderboard_image_bytes
 
 # Настройка логирования
 logging.basicConfig(
@@ -69,9 +57,6 @@ ADMIN_TELEGRAM_IDS = {8379101989}
 TRIAL_DAYS = 7
 SUBSCRIPTION_PRICE_TEXT = "200 ₽/месяц"
 SUBSCRIPTION_CONTACT = "@dakonoplev2"
-AVATAR_CACHE_DIR = Path("cache/avatars")
-CUSTOM_AVATAR_DIR = AVATAR_CACHE_DIR / "custom"
-AVATAR_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 MONTH_NAMES = {
     1: "января", 2: "февраля", 3: "марта", 4: "апреля",
@@ -142,7 +127,6 @@ class CacheEntry:
 
 
 _SHORT_CACHE_SECONDS = 20
-_DASHBOARD_CACHE: dict[str, CacheEntry] = {}
 _LEADERBOARD_CACHE: dict[str, CacheEntry] = {}
 
 
@@ -342,91 +326,6 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def resolve_user_avatar_path(user_id: int) -> str:
-    return get_effective_avatar(user_id)
-
-
-async def _refresh_telegram_avatar_cache(context: CallbackContext, telegram_id: int, user_id: int) -> str:
-    AVATAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache = AVATAR_CACHE_DIR / f"tg_{telegram_id}.jpg"
-    if cache.exists() and (datetime.now().timestamp() - cache.stat().st_mtime) <= AVATAR_CACHE_TTL_SECONDS:
-        DatabaseManager.set_telegram_avatar_path(user_id, str(cache))
-        return str(cache)
-    try:
-        photos = await context.bot.get_user_profile_photos(user_id=telegram_id, limit=1)
-        if not photos or not photos.photos:
-            return ""
-        file_id = photos.photos[0][-1].file_id
-        file = await context.bot.get_file(file_id)
-        data = await file.download_as_bytearray()
-        cache.write_bytes(bytes(data))
-        DatabaseManager.set_telegram_avatar_path(user_id, str(cache))
-        return str(cache)
-    except Exception:
-        logger.exception("telegram avatar refresh failed telegram_id=%s", telegram_id)
-        return ""
-
-
-def _validate_image_bytes(payload: bytes) -> tuple[bool, str]:
-    if not payload or len(payload) < 64:
-        return False, "Файл пустой или повреждён."
-    if len(payload) > 10 * 1024 * 1024:
-        return False, "Файл слишком большой (максимум 10 МБ)."
-    try:
-        with Image.open(BytesIO(payload)) as img:
-            img.verify()
-        with Image.open(BytesIO(payload)) as img2:
-            w, h = img2.size
-            if w < 64 or h < 64:
-                return False, "Слишком маленькое изображение. Минимум 64×64."
-    except UnidentifiedImageError:
-        return False, "Не удалось распознать изображение."
-    except Exception:
-        return False, "Изображение повреждено."
-    return True, ""
-
-
-async def _consume_profile_avatar_upload(update: Update, context: CallbackContext, db_user: dict) -> bool:
-    if not context.user_data.get("awaiting_profile_avatar"):
-        return False
-
-    message = update.message
-    if not message:
-        return False
-
-    payload: bytes | None = None
-    if message.photo:
-        file = await context.bot.get_file(message.photo[-1].file_id)
-        payload = bytes(await file.download_as_bytearray())
-    elif message.document:
-        mime = str(message.document.mime_type or "")
-        if not mime.startswith("image/"):
-            await message.reply_text("Пришли изображение (фото или файл-картинку).")
-            return True
-        file = await context.bot.get_file(message.document.file_id)
-        payload = bytes(await file.download_as_bytearray())
-    else:
-        await message.reply_text("Пришли фото или файл-изображение. Для отмены нажми «♻️ Сбросить аватар».")
-        return True
-
-    ok, err = _validate_image_bytes(payload or b"")
-    if not ok:
-        await message.reply_text(f"❌ {err} Попробуй другое изображение.")
-        return True
-
-    try:
-        avatar_path = save_custom_avatar(db_user["id"], payload or b"", CUSTOM_AVATAR_DIR)
-        invalidate_avatar_cache(db_user["id"], AVATAR_CACHE_DIR)
-        invalidate_leaderboard_cache()
-        logger.info("profile avatar saved user_id=%s path=%s", db_user["id"], avatar_path)
-        context.user_data.pop("awaiting_profile_avatar", None)
-        await _render_profile_view(message, context, db_user, int(update.effective_user.id), notice="✅ Кастомный аватар сохранён и применён.")
-    except Exception:
-        logger.exception("avatar upload failed user_id=%s", db_user.get("id"))
-        await message.reply_text("❌ Не удалось сохранить аватар. Попробуй ещё раз.")
-    return True
-
-
 def get_decade_period(target: date | None = None):
     current = target or now_local().date()
     if current.day <= 10:
@@ -564,8 +463,6 @@ def is_allowed_when_expired_callback(data: str) -> bool:
         "subscription_info_photo",
         "account_info",
         "profile_change_name",
-        "profile_avatar_upload",
-        "profile_avatar_reset",
         "profile_change_rank_prefix",
         "back",
     }
@@ -828,13 +725,8 @@ TOOLS_COMBO = "🧩 Комбо"
 TOOLS_DECADE_GOAL = "🎯 Цель декады"
 TOOLS_RESET = "🗑️ Сброс всех данных"
 TOOLS_ADMIN = "🛡️ Админ панель"
-TOOLS_TOGGLE_IMAGES_OFF = "🖼 Убрать картинки"
-TOOLS_TOGGLE_IMAGES_ON = "🖼 Включить картинки"
 TOOLS_BACK = "🔙 Назад"
 
-
-def tools_toggle_images_label(images_enabled: bool) -> str:
-    return TOOLS_TOGGLE_IMAGES_OFF if images_enabled else TOOLS_TOGGLE_IMAGES_ON
 
 
 def create_main_reply_keyboard(has_active_shift: bool = False, subscription_active: bool = True, shift_paused: bool = False) -> ReplyKeyboardMarkup:
@@ -869,12 +761,11 @@ def create_main_reply_keyboard(has_active_shift: bool = False, subscription_acti
     )
 
 
-def create_tools_reply_keyboard(is_admin: bool = False, images_enabled: bool = True) -> ReplyKeyboardMarkup:
+def create_tools_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(TOOLS_PRICE), KeyboardButton(TOOLS_CALENDAR)],
         [KeyboardButton(TOOLS_HISTORY), KeyboardButton(TOOLS_COMBO)],
         [KeyboardButton(TOOLS_DECADE_GOAL), KeyboardButton(TOOLS_RESET)],
-        [KeyboardButton(tools_toggle_images_label(images_enabled))],
     ]
     if is_admin:
         keyboard.append([KeyboardButton(TOOLS_ADMIN)])
@@ -1209,122 +1100,6 @@ def build_decade_progress_dashboard(user_id: int) -> str:
         f"Машин в декаде: {cars_done}\n"
         f"Средний чек декады: {format_money(avg_check)}"
     )
-
-
-def _compute_pace_metric(user_id: int, start_d: date, end_d: date, goal: int, earned: int, work_units_total: int, active_shift_started: bool = False) -> tuple[str, tuple[int, int, int, int], int]:
-    if goal <= 0 or work_units_total <= 0:
-        return "—", TOKENS["TEXT_SECONDARY"], 0
-    shifts_done = DatabaseManager.get_shifts_count_between_dates(user_id, start_d.isoformat(), end_d.isoformat())
-    if not active_shift_started:
-        # Если смена сегодня не стартовала, не считаем текущий день как обязательный прогресс.
-        shifts_done = min(shifts_done, max(0, work_units_total - 1)) if now_local().date() <= end_d else shifts_done
-    completed_units = max(0, min(work_units_total, shifts_done))
-    if completed_units == 0:
-        return "Старт", TOKENS["TEXT_SECONDARY"], 0
-
-    expected = goal * (completed_units / max(1, work_units_total))
-    if expected <= 0:
-        return "—", TOKENS["TEXT_SECONDARY"], 0
-
-    pace_pct = int(round((earned / expected) * 100))
-    if pace_pct > 102:
-        color = TOKENS["POSITIVE"]
-    elif pace_pct < 98:
-        color = TOKENS["NEGATIVE"]
-    else:
-        color = TOKENS["TEXT_SECONDARY"]
-    return f"{pace_pct}%", color, int(round(earned - expected))
-
-
-def _build_open_dashboard_payload(user_id: int, shift: dict, cars: list[dict], total: int) -> dict:
-    snapshot = DashboardStateService.build_snapshot(user_id)
-    shift_start = parse_datetime(shift.get("start_time"))
-    shift_target = int(shift.get("shift_target") or 0)
-    shift_income = int(total or 0)
-
-    progress = (snapshot.current_revenue / snapshot.decade_goal) if snapshot.decade_goal > 0 else 0.0
-    trend = snapshot.trend_vs_previous_decade
-    if trend > 0:
-        trend_color = (122, 255, 159, 255)
-        trend_text = f"+{round(trend)}% к прошлой декаде"
-    elif trend < 0:
-        trend_color = (255, 172, 96, 255)
-        trend_text = f"{round(trend)}% к прошлой декаде"
-    else:
-        trend_color = (221, 227, 238, 255)
-        trend_text = "0% к прошлой декаде"
-
-    return {
-        "title": "Дашборд",
-        "status": snapshot.status,
-        "period": snapshot.period_label,
-        "decade_title": f"{snapshot.period_start.strftime('%d.%m')}–{snapshot.period_end.strftime('%d.%m')}",
-        "shift_start_label": shift_start.strftime("%d.%m %H:%M") if shift_start else "—",
-        "shift_income": shift_income,
-        "shift_cars": len(cars),
-        "shift_target": shift_target,
-        "today_progress": (shift_income / shift_target) if shift_target > 0 else 0,
-        "remaining_shift_text": format_money_glass(max(shift_target - shift_income, 0)) if shift_target > 0 else "—",
-        "decade_earned": snapshot.current_revenue,
-        "decade_goal": snapshot.decade_goal,
-        "completion_percent": progress,
-        "remaining_text": format_money_glass(snapshot.remaining_to_goal),
-        "needed_per_shift_text": format_money_glass(snapshot.needed_per_shift),
-        "work_units_left": snapshot.shifts_left,
-        "decade_shifts": snapshot.shifts_count,
-        "decade_cars": snapshot.cars_count,
-        "mini": [
-            f"Смен: {snapshot.shifts_count}",
-            f"Машин: {snapshot.cars_count}",
-            f"Средний чек: {format_money_glass(snapshot.average_check)}",
-        ],
-        "trend_text": trend_text,
-        "trend_color": trend_color,
-        "updated_at": snapshot.updated_at,
-    }
-
-
-def _build_closed_dashboard_payload(user_id: int, closed_shift: dict | None = None, closed_cars: list[dict] | None = None, closed_total: int | None = None) -> dict:
-    snapshot = DashboardStateService.build_snapshot(user_id)
-
-    trend = snapshot.trend_vs_previous_decade
-    if trend > 0:
-        trend_color = (122, 255, 159, 255)
-        trend_text = f"+{round(trend)}% к прошлой декаде"
-    elif trend < 0:
-        trend_color = (255, 172, 96, 255)
-        trend_text = f"{round(trend)}% к прошлой декаде"
-    else:
-        trend_color = (221, 227, 238, 255)
-        trend_text = "0% к прошлой декаде"
-
-    progress = (snapshot.current_revenue / snapshot.decade_goal) if snapshot.decade_goal > 0 else 0.0
-
-    return {
-        "title": "Итоги",
-        "status": snapshot.status,
-        "period": snapshot.period_label,
-        "decade_title": f"{snapshot.period_start.strftime('%d.%m')}–{snapshot.period_end.strftime('%d.%m')}",
-        "earned": snapshot.current_revenue,
-        "goal": snapshot.decade_goal,
-        "completion_percent": progress,
-        "remaining_text": format_money_glass(snapshot.remaining_to_goal),
-        "needed_per_shift_text": format_money_glass(snapshot.needed_per_shift),
-        "work_units_left": snapshot.shifts_left,
-        "decade_shifts": snapshot.shifts_count,
-        "decade_cars": snapshot.cars_count,
-        "mini": [
-            f"Смен: {snapshot.shifts_count}",
-            f"Машин: {snapshot.cars_count}",
-            f"Средний чек: {format_money_glass(snapshot.average_check)}",
-        ],
-        "trend_text": trend_text,
-        "trend_color": trend_color,
-        "updated_at": snapshot.updated_at,
-    }
-
-
-
 
 
 def build_shift_repeat_report_text(shift_id: int) -> str:
@@ -1696,7 +1471,6 @@ def create_tools_inline_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup
         [InlineKeyboardButton("🧩 Комбо", callback_data="combo_settings")],
         [InlineKeyboardButton("🎯 Цель декады", callback_data="change_decade_goal")],
         [InlineKeyboardButton("🗑️ Сброс всех данных", callback_data="reset_data")],
-        [InlineKeyboardButton("🖼 Убрать картинки", callback_data="toggle_images_mode")],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton("🛡️ Админ панель", callback_data="admin_panel")])
@@ -1730,7 +1504,7 @@ async def tools_hub_message(update: Update, context: CallbackContext):
     push_screen(context, Screen(name="tools_menu", kind="reply"))
     await update.message.reply_text(
         "🧰 Инструменты\nВыбери нужный раздел.",
-        reply_markup=create_tools_reply_keyboard(is_admin=is_admin_telegram(update.effective_user.id), images_enabled=is_images_mode_enabled(DatabaseManager.get_user(update.effective_user.id))),
+        reply_markup=create_tools_reply_keyboard(is_admin=is_admin_telegram(update.effective_user.id)),
     )
 
 
@@ -1802,8 +1576,6 @@ async def handle_media_message(update: Update, context: CallbackContext):
             await update.message.reply_text("✅ Видео FAQ обновлено. Пользователи будут получать его как полноценное видео.")
             return
 
-    if db_user_for_access and await _consume_profile_avatar_upload(update, context, db_user_for_access):
-        return
 
 
 async def handle_message(update: Update, context: CallbackContext):
@@ -1878,8 +1650,6 @@ async def handle_message(update: Update, context: CallbackContext):
             await update.message.reply_text("✅ Видео FAQ обновлено. Пользователи будут получать его как полноценное видео.")
             return
 
-    if db_user_for_access and await _consume_profile_avatar_upload(update, context, db_user_for_access):
-        return
 
 
 async def handle_message(update: Update, context: CallbackContext):
@@ -2236,8 +2006,6 @@ async def handle_message(update: Update, context: CallbackContext):
         TOOLS_DECADE_GOAL,
         TOOLS_RESET,
         TOOLS_ADMIN,
-        TOOLS_TOGGLE_IMAGES_OFF,
-        TOOLS_TOGGLE_IMAGES_ON,
         TOOLS_BACK,
     }:
         db_user = DatabaseManager.get_user(user.id)
@@ -2269,9 +2037,6 @@ async def handle_message(update: Update, context: CallbackContext):
             return
         if text == TOOLS_RESET:
             await update.message.reply_text("Подтверди сброс:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ Сброс всех данных", callback_data="reset_data")]]))
-            return
-        if text in {TOOLS_TOGGLE_IMAGES_OFF, TOOLS_TOGGLE_IMAGES_ON}:
-            await toggle_images_mode_message(update, context)
             return
         if text == TOOLS_ADMIN and is_admin_telegram(user.id):
             await send_admin_panel_for_message(update)
@@ -2380,7 +2145,6 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "reset_data_yes": reset_data_confirm_yes,
         "reset_data_no": reset_data_confirm_no,
         "toggle_price": toggle_price_mode,
-        "toggle_images_mode": toggle_images_mode,
         "combo_settings": combo_settings_menu,
         "combo_create_settings": combo_builder_start,
         "admin_panel": admin_panel,
@@ -2403,8 +2167,6 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "subscription_info_photo": subscription_info_photo_callback,
         "account_info": account_info_callback,
         "profile_change_name": profile_change_name_callback,
-        "profile_avatar_upload": profile_avatar_upload_callback,
-        "profile_avatar_reset": profile_avatar_reset_callback,
         "profile_change_rank_prefix": profile_change_rank_prefix_callback,
         "show_price": show_price_callback,
         "calendar_open": calendar_callback,
@@ -2649,22 +2411,7 @@ async def current_shift(query, context):
     active_shift = DatabaseManager.get_active_shift(db_user['id'])
     if not active_shift:
         text_message = build_decade_progress_dashboard(db_user['id'])
-        image = None
-        if is_images_mode_enabled(db_user):
-            try:
-                image = await build_dashboard_image_cached("closed", db_user["id"], _build_closed_dashboard_payload(db_user["id"]))
-            except Exception:
-                logger.exception("dashboard closed image render failed")
-        if image is not None:
-            await context.bot.send_photo(
-                chat_id=query.message.chat_id,
-                photo=image,
-                filename="dashboard.png",
-                caption="📊 Дашборд",
-            )
-            await query.edit_message_text("📭 Нет активной смены. Показал прогресс декады.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Обновить дашборд", callback_data="refresh_dashboard")]]))
-        else:
-            await query.edit_message_text(text_message, parse_mode="HTML")
+        await query.edit_message_text(text_message, parse_mode="HTML")
         await query.message.reply_text(
             "Выбери действие:",
             reply_markup=create_main_reply_keyboard(False)
@@ -2674,23 +2421,11 @@ async def current_shift(query, context):
     cars = DatabaseManager.get_shift_cars(active_shift['id'])
     total = DatabaseManager.get_shift_total(active_shift['id'])
     message = build_current_shift_dashboard(db_user['id'], active_shift, cars, total)
-    image = None
-    if is_images_mode_enabled(db_user):
-        try:
-            image = await build_dashboard_image_cached("open", db_user["id"], _build_open_dashboard_payload(db_user["id"], active_shift, cars, total))
-        except Exception:
-            logger.exception("dashboard open image render failed")
-    if image is not None:
-        await context.bot.send_photo(chat_id=query.message.chat_id, photo=image, filename="dashboard.png", caption="📊 Дашборд")
-        await query.edit_message_text("✅ Дашборд сформирован", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Обновить дашборд", callback_data="refresh_dashboard")]]))
-    else:
-        await query.edit_message_text(
-            message,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 В меню", callback_data="back")],
-            ]),
-        )
+    await query.edit_message_text(
+        message,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="back")]]),
+    )
     await query.message.reply_text(
         "Выбери действие:",
         reply_markup=create_main_reply_keyboard(True)
@@ -3458,7 +3193,6 @@ async def subscription_message(update: Update, context: CallbackContext):
 
 def _clear_profile_waiting_flags(context: CallbackContext) -> None:
     context.user_data.pop("awaiting_profile_name", None)
-    context.user_data.pop("awaiting_profile_avatar", None)
     context.user_data.pop("awaiting_profile_rank_prefix", None)
 
 
@@ -3468,10 +3202,6 @@ async def _render_profile_view(message, context: CallbackContext, db_user: dict,
     if notice:
         profile_text = f"{profile_text}\n\n{notice}"
     profile_keyboard = build_profile_keyboard(db_user, telegram_id)
-    avatar = get_effective_avatar(db_user["id"])
-    if avatar:
-        await message.reply_photo(photo=Path(avatar).read_bytes(), caption=profile_text[:1024], reply_markup=profile_keyboard)
-        return
     await send_text_with_optional_photo(message, context, profile_text, reply_markup=profile_keyboard, section="profile")
 
 
@@ -3510,16 +3240,12 @@ def build_profile_text(db_user: dict, telegram_id: int) -> str:
     status_text = "✅ Подписка активна" if is_subscription_active(db_user) else "⛔ Подписка неактивна"
     total_cars = DatabaseManager.get_cars_count_between_dates(db_user["id"], "2000-01-01", "2100-01-01")
     total_earned = DatabaseManager.get_user_total_between_dates(db_user["id"], "2000-01-01", "2100-01-01")
-    avatar_source_code = get_avatar_source(db_user["id"])
-    source_map = {"custom": "custom", "telegram": "telegram", "default": "default"}
-    avatar_source = source_map.get(avatar_source_code, "default")
     rank_prefix = DatabaseManager.get_rank_prefix(db_user["id"])
     return (
         f"👤 Профиль: {db_user.get('name', 'Пользователь')}\n"
         f"ID: {telegram_id}\n\n"
         f"Статус: {status_text}\n"
         f"Действует до: {expires_text}\n\n"
-        f"Аватар: {avatar_source}\n"
         f"Префикс ранга: {rank_prefix or '—'}\n\n"
         f"Всего сделано машин: {total_cars}\n"
         f"Всего заработано: {format_money(total_earned)}"
@@ -3530,8 +3256,6 @@ def build_profile_keyboard(db_user: dict, telegram_id: int) -> InlineKeyboardMar
     callback = "subscription_info_photo" if get_section_photo_file_id("profile") else "subscription_info"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Изменить имя", callback_data="profile_change_name")],
-        [InlineKeyboardButton("📸 Загрузить аватар", callback_data="profile_avatar_upload")],
-        [InlineKeyboardButton("♻️ Сбросить аватар", callback_data="profile_avatar_reset")],
         [InlineKeyboardButton("🏷 Изменить префикс ранга", callback_data="profile_change_rank_prefix")],
         [InlineKeyboardButton("Купить подписку", callback_data=callback)],
     ])
@@ -3549,28 +3273,6 @@ async def profile_change_name_callback(query, context):
     await _replace_profile_message(query, prompt)
 
 
-async def profile_avatar_upload_callback(query, context):
-    logger.info("profile callback invoked action=profile_avatar_upload user_id=%s", query.from_user.id)
-    _clear_profile_waiting_flags(context)
-    context.user_data["awaiting_profile_avatar"] = True
-    await _replace_profile_message(
-        query,
-        "Отправь фото или файл-картинку одним сообщением — сохраним как кастомный аватар.\n"
-        "Поддерживаются JPG/PNG/WebP до 10 МБ.",
-    )
-    logger.info("profile avatar mode enabled user_id=%s", query.from_user.id)
-
-
-async def profile_avatar_reset_callback(query, context):
-    logger.info("profile callback invoked action=profile_avatar_reset user_id=%s", query.from_user.id)
-    db_user = DatabaseManager.get_user(query.from_user.id)
-    if not db_user:
-        await query.edit_message_text("❌ Пользователь не найден")
-        return
-    source = reset_avatar(db_user["id"], CUSTOM_AVATAR_DIR)
-    logger.info("profile avatar reset user_id=%s source=%s", db_user["id"], source)
-    invalidate_leaderboard_cache()
-    await _show_unified_profile_from_callback(query, context, notice=f"♻️ Аватар сброшен. Текущий источник: {source}.")
 
 
 
@@ -4730,23 +4432,11 @@ async def close_shift_confirm_yes(query, context, data):
         await send_goal_status(None, context, db_user["id"], source_message=query.message)
     closed_shift = DatabaseManager.get_shift(shift_id) or shift
     message = build_closed_shift_dashboard(closed_shift, cars, total)
-    image = None
-    if is_images_mode_enabled(db_user):
-        try:
-            image = await build_dashboard_image_cached("closed", db_user["id"], _build_closed_dashboard_payload(db_user["id"], closed_shift, cars, total))
-        except Exception:
-            logger.exception("dashboard closed image render failed")
-    if image is not None:
-        await context.bot.send_photo(chat_id=query.message.chat_id, photo=image, filename="dashboard.png", caption="📊 Дашборд")
-        await query.edit_message_text("✅ Смена закрыта. Дашборд отправлен.")
-    else:
-        await query.edit_message_text(
-            message,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 В меню", callback_data="back")],
-            ]),
-        )
+    await query.edit_message_text(
+        message,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="back")]]),
+    )
     await query.message.reply_text(build_shift_repeat_report_text(shift_id))
     await query.message.reply_text(
         "Выбери действие:",
@@ -4847,58 +4537,8 @@ def build_leaderboard_text(decade_title: str, decade_leaders: list[dict]) -> str
     return "\n".join(header + ["", "Кто впереди — тот забирает декаду 👇", ""] + lines)
 
 
-def build_leaderboard_image_bytes(decade_title: str, decade_leaders: list[dict], highlight_name: str | None = None, top3_avatars: dict[int, object] | None = None) -> BytesIO | None:
-    if importlib.util.find_spec("PIL") is None:
-        return None
-    return render_leaderboard_image_bytes(decade_title, decade_leaders, highlight_name=highlight_name, top3_avatars=top3_avatars, updated_at=now_local())
-
-
-def build_dashboard_image_bytes_open(payload: dict) -> BytesIO | None:
-    return _build_dashboard_image("open", payload)
-
-
-def build_dashboard_image_bytes_closed(payload: dict) -> BytesIO | None:
-    return _build_dashboard_image("closed", payload)
-
-
-async def build_dashboard_image_cached(mode: str, user_id: int, payload: dict) -> BytesIO | None:
-    payload_key = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    key = f"{mode}:{user_id}:{hash(payload_key)}"
-    cached = _cache_get(_DASHBOARD_CACHE, key)
-    if cached is not None:
-        logger.info("dashboard cache hit user_id=%s mode=%s", user_id, mode)
-        return cached
-    logger.info("dashboard cache miss user_id=%s mode=%s", user_id, mode)
-    if mode == "open":
-        image = await asyncio.to_thread(build_dashboard_image_bytes_open, payload)
-    else:
-        image = await asyncio.to_thread(build_dashboard_image_bytes_closed, payload)
-    return _cache_set(_DASHBOARD_CACHE, key, image)
-def _build_dashboard_image(mode: str, payload: dict) -> BytesIO | None:
-    if importlib.util.find_spec("PIL") is None:
-        return None
-    return render_dashboard_image_bytes(mode, payload)
-
-
 async def send_leaderboard_output(chat_target, context: CallbackContext, decade_title: str, decade_leaders: list[dict], reply_markup=None, highlight_name: str | None = None, requester_telegram_id: int | None = None):
     text_message = build_leaderboard_text(decade_title, decade_leaders)
-    db_user = DatabaseManager.get_user(requester_telegram_id) if requester_telegram_id else None
-    image = None
-    if is_images_mode_enabled(db_user):
-        try:
-            enriched = []
-            for row in decade_leaders:
-                enriched_row = dict(row)
-                uid = _safe_int(row.get("user_id"), 0)
-                if uid > 0:
-                    enriched_row["avatar_path"] = resolve_user_avatar_path(uid)
-                enriched.append(enriched_row)
-            image = await asyncio.to_thread(build_leaderboard_image_bytes, decade_title, enriched, highlight_name)
-        except Exception:
-            logger.exception("leaderboard image render failed")
-    if image is not None:
-        await chat_target.reply_photo(photo=image, filename="leaderboard.png", caption="🏆 Топ героев", reply_markup=reply_markup)
-        return
     await chat_target.reply_text(text_message, reply_markup=reply_markup)
 
 
@@ -4909,9 +4549,6 @@ async def leaderboard(query, context):
     decade_leaders = await asyncio.to_thread(get_cached_decade_leaderboard, today.year, today.month, idx)
 
     db_user = DatabaseManager.get_user(query.from_user.id)
-    if db_user:
-        await _refresh_telegram_avatar_cache(context, query.from_user.id, db_user["id"])
-
     has_active = bool(db_user and DatabaseManager.get_active_shift(db_user['id']))
     highlight_name = db_user["name"] if db_user else (query.from_user.first_name or "")
     await query.edit_message_text("🏆 Формирую рейтинг...")
@@ -5052,37 +4689,17 @@ async def current_shift_message(update: Update, context: CallbackContext):
     active_shift = DatabaseManager.get_active_shift(db_user['id'])
     if not active_shift:
         message = build_decade_progress_dashboard(db_user['id'])
-        image = None
-        if is_images_mode_enabled(db_user):
-            try:
-                image = await build_dashboard_image_cached("closed", db_user["id"], _build_closed_dashboard_payload(db_user["id"]))
-            except Exception:
-                logger.exception("dashboard closed image render failed")
-        if image is not None:
-            await update.message.reply_photo(photo=image, filename="dashboard.png", caption="📊 Дашборд")
-        else:
-            await update.message.reply_text(
-                message,
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 В меню", callback_data="back")],
-                ])
-            )
+        await update.message.reply_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В меню", callback_data="back")]])
+        )
         return
 
     cars = DatabaseManager.get_shift_cars(active_shift['id'])
     total = DatabaseManager.get_shift_total(active_shift['id'])
     message = build_current_shift_dashboard(db_user['id'], active_shift, cars, total)
-    image = None
-    if is_images_mode_enabled(db_user):
-        try:
-            image = await build_dashboard_image_cached("open", db_user["id"], _build_open_dashboard_payload(db_user["id"], active_shift, cars, total))
-        except Exception:
-            logger.exception("dashboard open image render failed")
-    if image is not None:
-        await update.message.reply_photo(photo=image, filename="dashboard.png", caption="📊 Дашборд")
-    else:
-        await update.message.reply_text(
+    await update.message.reply_text(
             message,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -5440,42 +5057,6 @@ async def toggle_price_mode(query, context):
     await query.edit_message_text(
         f"✅ Прайс переключен: {label}\n"
         "Откройте машину и добавляйте услуги в этом режиме."
-    )
-
-
-def is_images_mode_enabled(db_user: dict | None) -> bool:
-    return bool(db_user and DatabaseManager.is_images_enabled(int(db_user["id"])))
-
-
-async def toggle_images_mode(query, context):
-    db_user = DatabaseManager.get_user(query.from_user.id)
-    if not db_user:
-        await query.edit_message_text("❌ Пользователь не найден")
-        return
-
-    current = DatabaseManager.is_images_enabled(db_user["id"])
-    DatabaseManager.set_images_enabled(db_user["id"], not current)
-    new_enabled = not current
-    state = "включены" if new_enabled else "выключены"
-    await query.edit_message_text(f"✅ Режим обновлён: картинки {state}.")
-
-
-async def toggle_images_mode_message(update: Update, context: CallbackContext):
-    db_user = DatabaseManager.get_user(update.effective_user.id)
-    if not db_user:
-        await update.message.reply_text("❌ Пользователь не найден")
-        return
-
-    current = DatabaseManager.is_images_enabled(db_user["id"])
-    DatabaseManager.set_images_enabled(db_user["id"], not current)
-    new_enabled = not current
-    state = "включены" if new_enabled else "выключены"
-    await update.message.reply_text(
-        f"✅ Режим обновлён: картинки {state}.",
-        reply_markup=create_tools_reply_keyboard(
-            is_admin=is_admin_telegram(update.effective_user.id),
-            images_enabled=new_enabled,
-        ),
     )
 
 
