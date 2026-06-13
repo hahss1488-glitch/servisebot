@@ -120,8 +120,8 @@ def validate_car_number(text: str) -> tuple[bool, str, str]:
     if len(normalized) < 6:
         return False, normalized, f"Номер слишком короткий: {normalized}"
 
-    pattern_full = f'^[{RUS_LETTERS}]\d{{3}}[{RUS_LETTERS}]{{2}}\d{{3}}$'
-    pattern_short = f'^[{RUS_LETTERS}]\d{{3}}[{RUS_LETTERS}]{{2}}$'
+    pattern_full = rf'^[{RUS_LETTERS}]\d{{3}}[{RUS_LETTERS}]{{2}}\d{{3}}$'
+    pattern_short = rf'^[{RUS_LETTERS}]\d{{3}}[{RUS_LETTERS}]{{2}}$'
 
     if re.match(pattern_short, normalized):
         return True, normalized + DEFAULT_REGION, ""

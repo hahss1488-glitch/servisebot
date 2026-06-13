@@ -18,7 +18,7 @@ def test_account_entrypoints_use_unified_renderer(monkeypatch):
         effective_user=SimpleNamespace(id=77),
         message=SimpleNamespace(reply_text=AsyncMock()),
     )
-    context = SimpleNamespace(user_data={"awaiting_profile_avatar": True})
+    context = SimpleNamespace(user_data={"awaiting_profile_name": True})
 
     asyncio.run(bot.account_message(update, context))
     render.assert_awaited_once()
@@ -35,7 +35,7 @@ def test_account_info_callback_routes_to_unified_renderer(monkeypatch):
 
 @pytest.mark.parametrize(
     "cb",
-    ["profile_avatar_upload", "profile_avatar_reset", "profile_change_rank_prefix"],
+    ["profile_change_name", "profile_change_rank_prefix"],
 )
 def test_profile_keyboard_has_expected_callbacks(cb, monkeypatch):
     monkeypatch.setattr(bot, "get_section_photo_file_id", lambda section: "")
@@ -45,6 +45,4 @@ def test_profile_keyboard_has_expected_callbacks(cb, monkeypatch):
 
 
 def test_expired_subscription_allows_profile_callbacks():
-    assert bot.is_allowed_when_expired_callback("profile_avatar_upload")
-    assert bot.is_allowed_when_expired_callback("profile_avatar_reset")
     assert bot.is_allowed_when_expired_callback("profile_change_rank_prefix")
