@@ -1,5 +1,9 @@
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
 BOT_TOKEN = os.getenv("SERVICEBOT_TOKEN", "")
 
 BASE_DIR = Path(__file__).resolve().parent
