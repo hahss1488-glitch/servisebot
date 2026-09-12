@@ -53,15 +53,17 @@ APP_VERSION = "2026.03.09-hotfix-24"
 APP_UPDATED_AT = "09.03.2026 07:40 (МСК)"
 APP_TIMEZONE = "Europe/Moscow"
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
-CITIES = [
-    ("Москва", "Europe/Moscow"), ("Санкт-Петербург", "Europe/Moscow"),
-    ("Нижний Новгород", "Europe/Moscow"), ("Екатеринбург", "Asia/Yekaterinburg"),
-    ("Самара", "Europe/Samara"), ("Казань", "Europe/Moscow"),
-    ("Новосибирск", "Asia/Novosibirsk"), ("Челябинск", "Asia/Yekaterinburg"),
-    ("Сочи", "Europe/Moscow"), ("Пермь", "Asia/Yekaterinburg"),
-    ("Краснодар", "Europe/Moscow"), ("Ярославль", "Europe/Moscow"),
-    ("Ростов-на-Дону", "Europe/Moscow"), ("Тольятти", "Europe/Samara"),
-    ("Тула", "Europe/Moscow"), ("Уфа", "Asia/Yekaterinburg"),
+RUSSIAN_TIMEZONES = [
+    ("Europe/Kaliningrad", "Калининград (UTC+2)"), ("Europe/Moscow", "Москва (UTC+3)"),
+    ("Europe/Samara", "Самара (UTC+4)"), ("Asia/Yekaterinburg", "Екатеринбург (UTC+5)"),
+    ("Asia/Omsk", "Омск (UTC+6)"), ("Asia/Novosibirsk", "Новосибирск (UTC+7)"),
+    ("Asia/Barnaul", "Барнаул (UTC+7)"), ("Asia/Krasnoyarsk", "Красноярск (UTC+7)"),
+    ("Asia/Irkutsk", "Иркутск (UTC+8)"), ("Asia/Chita", "Чита (UTC+9)"),
+    ("Asia/Yakutsk", "Якутск (UTC+9)"), ("Asia/Khandyga", "Хандыга (UTC+9)"),
+    ("Asia/Vladivostok", "Владивосток (UTC+10)"), ("Asia/Ust-Nera", "Усть-Нера (UTC+10)"),
+    ("Asia/Magadan", "Магадан (UTC+11)"), ("Asia/Sakhalin", "Сахалин (UTC+11)"),
+    ("Asia/Srednekolymsk", "Среднеколымск (UTC+11)"), ("Asia/Kamchatka", "Камчатка (UTC+12)"),
+    ("Asia/Anadyr", "Анадырь (UTC+12)"),
 ]
 ADMIN_TELEGRAM_IDS = {8379101989}
 TRIAL_DAYS = 7
@@ -426,7 +428,7 @@ def build_settings_keyboard(db_user: dict | None, is_admin: bool) -> InlineKeybo
     decade_goal_enabled = bool(db_user and DatabaseManager.is_goal_enabled(db_user["id"]))
     decade_label = "📆 Цель декады: ВКЛ" if decade_goal_enabled else "📆 Цель декады: ВЫКЛ"
     keyboard = [
-        [InlineKeyboardButton("🏙️ Город", callback_data="city_settings")],
+        [InlineKeyboardButton("🕐 Часовой пояс", callback_data="timezone_settings")],
         [InlineKeyboardButton("💰 Переключение прайса", callback_data="price_switch_settings")],
         [InlineKeyboardButton("🚗 Регион ТС", callback_data="region_settings")],
         [InlineKeyboardButton(decade_label, callback_data="change_decade_goal")],
@@ -739,7 +741,7 @@ TOOLS_DECADE_GOAL = "🎯 Цель декады"
 TOOLS_RESET = "🗑️ Сброс всех данных"
 TOOLS_ADMIN = "🛡️ Админ панель"
 TOOLS_BACK = "🔙 Назад"
-SETTINGS_CITY = "🏙️ Город"
+SETTINGS_TIMEZONE = "🕐 Часовой пояс"
 SETTINGS_PRICE_SWITCH = "💰 Переключение прайса"
 SETTINGS_REGION = "🚗 Регион ТС"
 SETTINGS_DECADE_GOAL = "🎯 Цель декады"
@@ -800,7 +802,7 @@ def create_tools_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
 
 def create_settings_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton(SETTINGS_CITY), KeyboardButton(SETTINGS_PRICE_SWITCH)],
+        [KeyboardButton(SETTINGS_TIMEZONE), KeyboardButton(SETTINGS_PRICE_SWITCH)],
         [KeyboardButton(SETTINGS_REGION), KeyboardButton(SETTINGS_DECADE_GOAL)],
         [KeyboardButton(SETTINGS_HISTORY), KeyboardButton(SETTINGS_COMBO)],
         [KeyboardButton(SETTINGS_RESET)],
@@ -2056,7 +2058,7 @@ async def handle_message(update: Update, context: CallbackContext):
         return
 
     if context.user_data.get("settings_menu_active") and text in {
-        SETTINGS_CITY,
+        SETTINGS_TIMEZONE,
         SETTINGS_PRICE_SWITCH,
         SETTINGS_REGION,
         SETTINGS_DECADE_GOAL,
@@ -2074,8 +2076,8 @@ async def handle_message(update: Update, context: CallbackContext):
                 reply_markup=create_tools_reply_keyboard(is_admin=is_admin_telegram(user.id)),
             )
             return
-        if text == SETTINGS_CITY:
-            await show_city_settings_message(update, db_user)
+        if text == SETTINGS_TIMEZONE:
+            await show_timezone_settings_message(update, db_user)
             return
         if text == SETTINGS_PRICE_SWITCH:
             await show_price_switch_settings_message(update, db_user)
@@ -2244,7 +2246,7 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "refresh_dashboard": current_shift,
         "history_0": history,
         "settings": settings,
-        "city_settings": city_settings,
+        "timezone_settings": timezone_settings,
         "price_switch_settings": price_switch_settings,
         "region_settings": region_settings,
         "region_toggle": region_toggle,
@@ -2372,7 +2374,7 @@ async def handle_callback(update: Update, context: CallbackContext):
     if prefix_handlers is None:
         prefix_handlers = [
         ("service_page_", change_services_page),
-        ("city_set_", city_set),
+        ("timezone_set_", timezone_set),
         ("price_switch_", price_switch_set),
         ("toggle_price_car_", toggle_price_mode_for_car),
         ("repeat_prev_", repeat_prev_services),
@@ -2601,82 +2603,41 @@ def _settings_back_button() -> list[list[InlineKeyboardButton]]:
     return [[InlineKeyboardButton("🔙 К настройкам", callback_data="settings")]]
 
 
-def build_city_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    current = DatabaseManager.get_price_preferences(user_id)["city"]
-    keyboard = [
-        [InlineKeyboardButton(("✅ " if city == current else "") + city, callback_data=f"city_set_{idx}")]
-        for idx, (city, _) in enumerate(CITIES)
-    ]
-    return InlineKeyboardMarkup(keyboard + _settings_back_button())
-
-
-async def show_city_settings_message(update: Update, db_user: dict | None) -> None:
-    if not db_user:
-        await update.message.reply_text("❌ Пользователь не найден")
-        return
-    await update.message.reply_text(
-        "🏙️ Город\n\nВыберите ваш город. В автоматическом режиме прайс меняется в 09:00 и 21:00 по нему.",
-        reply_markup=build_city_settings_keyboard(db_user["id"]),
-    )
-
-
-def build_price_switch_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    prefs = DatabaseManager.get_price_preferences(user_id)
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "manual" else "") + "Ручное", callback_data="price_switch_manual"),
-        InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "auto" else "") + "Автоматическое", callback_data="price_switch_auto"),
-    ]] + _settings_back_button())
-
-
-async def show_price_switch_settings_message(update: Update, db_user: dict | None) -> None:
-    if not db_user:
-        await update.message.reply_text("❌ Пользователь не найден")
-        return
-    await update.message.reply_text(
-        "💰 Переключение прайса\n\nАвтоматическое: день 09:00–21:00, ночь 21:00–09:00 по выбранному часовому поясу.\nРучное: в выборе услуг появится кнопка День/Ночь.",
-        reply_markup=build_price_switch_settings_keyboard(db_user["id"]),
-    )
-
-
-async def show_region_settings_message(update: Update, db_user: dict | None) -> None:
-    if not db_user:
-        await update.message.reply_text("❌ Пользователь не найден")
-        return
-    required = DatabaseManager.is_region_required(db_user["id"])
-    label = "Убрать регионы" if required else "Вернуть регионы"
-    explanation = "Регион обязателен в номере." if required else "Номера принимаются без региона и сохраняются без него."
-    await update.message.reply_text(
-        f"🚗 Регион ТС\n\n{explanation}",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="region_toggle")]] + _settings_back_button()),
-    )
-
-
-async def city_settings(query, context):
+async def timezone_settings(query, context):
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         return
-    await query.edit_message_text("🏙️ Город\n\nВыберите ваш город. В автоматическом режиме прайс меняется в 09:00 и 21:00 по нему.", reply_markup=build_city_settings_keyboard(db_user["id"]))
+    current = DatabaseManager.get_price_preferences(db_user["id"])["timezone"]
+    keyboard = [[InlineKeyboardButton(("✅ " if zone == current else "") + label, callback_data=f"timezone_set_{idx}")]
+                for idx, (zone, label) in enumerate(RUSSIAN_TIMEZONES)]
+    keyboard += _settings_back_button()
+    await query.edit_message_text("🕐 Часовой пояс\n\nВыберите ваш часовой пояс. В автоматическом режиме прайс меняется в 09:00 и 21:00 по нему.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-async def city_set(query, context, data):
+async def timezone_set(query, context, data):
     idx = int(data.rsplit("_", 1)[1])
-    if not 0 <= idx < len(CITIES):
+    if not 0 <= idx < len(RUSSIAN_TIMEZONES):
         return
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         return
-    city, timezone = CITIES[idx]
-    DatabaseManager.set_user_city(db_user["id"], city, timezone)
+    zone, label = RUSSIAN_TIMEZONES[idx]
+    DatabaseManager.set_user_timezone(db_user["id"], zone)
     mode = sync_price_mode_by_schedule(context, db_user["id"])
-    await query.answer("Город сохранён")
-    await query.edit_message_text(f"✅ Город: {city}\nТекущий прайс: {'день' if mode == 'day' else 'ночь'}.", reply_markup=InlineKeyboardMarkup(_settings_back_button()))
+    await query.answer("Часовой пояс сохранён")
+    await query.edit_message_text(f"✅ Часовой пояс: {label}\nТекущий прайс: {'день' if mode == 'day' else 'ночь'}.", reply_markup=InlineKeyboardMarkup(_settings_back_button()))
 
 
 async def price_switch_settings(query, context):
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         return
-    await query.edit_message_text("💰 Переключение прайса\n\nАвтоматическое: день 09:00–21:00, ночь 21:00–09:00 по выбранному часовому поясу.\nРучное: в выборе услуг появится кнопка День/Ночь.", reply_markup=build_price_switch_settings_keyboard(db_user["id"]))
+    prefs = DatabaseManager.get_price_preferences(db_user["id"])
+    keyboard = [[
+        InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "manual" else "") + "Ручное", callback_data="price_switch_manual"),
+        InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "auto" else "") + "Автоматическое", callback_data="price_switch_auto"),
+    ]] + _settings_back_button()
+    await query.edit_message_text("💰 Переключение прайса\n\nАвтоматическое: день 09:00–21:00, ночь 21:00–09:00 по выбранному часовому поясу.\nРучное: в выборе услуг появится кнопка День/Ночь.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def price_switch_set(query, context, data):

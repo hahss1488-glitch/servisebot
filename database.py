@@ -146,8 +146,6 @@ def init_database():
         cur.execute("ALTER TABLE user_settings ADD COLUMN price_switch_mode TEXT DEFAULT 'auto'")
     if "timezone" not in columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN timezone TEXT DEFAULT 'Europe/Moscow'")
-    if "city" not in columns:
-        cur.execute("ALTER TABLE user_settings ADD COLUMN city TEXT DEFAULT ''")
     if "region_required" not in columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN region_required INTEGER DEFAULT 1")
 
@@ -648,14 +646,13 @@ class DatabaseManager:
     @staticmethod
     def get_price_preferences(user_id: int) -> Dict:
         conn = get_connection()
-        row = conn.execute("SELECT price_mode, price_switch_mode, timezone, city FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+        row = conn.execute("SELECT price_mode, price_switch_mode, timezone FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
         conn.close()
         values = dict(row) if row else {}
         return {
             "price_mode": values.get("price_mode") if values.get("price_mode") in {"day", "night"} else "day",
             "switch_mode": values.get("price_switch_mode") if values.get("price_switch_mode") in {"auto", "manual"} else "auto",
             "timezone": values.get("timezone") or "Europe/Moscow",
-            "city": values.get("city") or "",
         }
 
     @staticmethod
@@ -670,17 +667,6 @@ class DatabaseManager:
         conn = get_connection()
         conn.execute("INSERT INTO user_settings (user_id, timezone) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET timezone = excluded.timezone", (user_id, timezone))
         conn.commit(); conn.close()
-
-    @staticmethod
-    def set_user_city(user_id: int, city: str, timezone: str) -> None:
-        conn = get_connection()
-        conn.execute(
-            """INSERT INTO user_settings (user_id, city, timezone) VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET city = excluded.city, timezone = excluded.timezone""",
-            (user_id, city, timezone),
-        )
-        conn.commit()
-        conn.close()
 
     @staticmethod
     def is_region_required(user_id: int) -> bool:
