@@ -525,9 +525,17 @@ def build_price_text() -> str:
     lines = ["💰 Прайс (день / ночь)", ""]
     for service_id in sorted(SERVICES.keys()):
         service = SERVICES[service_id]
-        if service.get("hidden"):
-            continue
         if service.get("kind") == "group":
+            lines.append(f"{plain_service_name(service.get('name', ''))}:")
+            for child_id in service.get("children", []):
+                child = SERVICES.get(child_id, {})
+                lines.append(
+                    f"• {plain_service_name(child.get('name', ''))} — "
+                    f"{child.get('day_price', 0)}₽ / {child.get('night_price', 0)}₽"
+                )
+            lines.append("")
+            continue
+        if service.get("hidden"):
             continue
         name = plain_service_name(service.get("name", ""))
         if service.get("kind") == "distance":
@@ -1432,16 +1440,11 @@ async def start_command(update: Update, context: CallbackContext):
 
         db_user = DatabaseManager.get_user(user.id)
 
-        is_new_user = False
         if not db_user:
-            name = " ".join(part for part in [user.first_name, user.last_name] if part) or user.username or "Пользователь"
-            DatabaseManager.register_user(user.id, name)
-            db_user = DatabaseManager.get_user(user.id)
-            is_new_user = True
-
-        if not db_user:
-            await update.message.reply_text("❌ Не удалось зарегистрировать пользователя. Повторите /start")
+            context.user_data["awaiting_registration_name"] = True
+            await update.message.reply_text("👋 Добро пожаловать! Как вас зовут?")
             return
+
         if is_user_blocked(db_user):
             await update.message.reply_text("⛔ Доступ к боту закрыт администратором.")
             return
@@ -1452,13 +1455,6 @@ async def start_command(update: Update, context: CallbackContext):
         context.user_data["price_mode"] = sync_price_mode_by_schedule(context, db_user["id"])
 
         has_active = DatabaseManager.get_active_shift(db_user['id']) is not None
-
-        if is_new_user and not is_admin_telegram(user.id):
-            await update.message.reply_text(
-                "🎉 Аккаунт активирован на 7 дней!\n"
-                f"Доступ до: {format_subscription_until(expires_at)}\n"
-                "Приятного пользования ботом."
-            )
 
         if not subscription_active:
             await update.message.reply_text(
@@ -1615,13 +1611,27 @@ async def handle_message(update: Update, context: CallbackContext):
     """Обработка текстовых сообщений"""
     user = update.effective_user
     text = (update.message.text or "").strip()
+    if context.user_data.get("awaiting_registration_name"):
+        name = " ".join(text.split())
+        if not name:
+            await update.message.reply_text("Введите имя текстом.")
+            return
+        if len(name) > 32:
+            name = name[:32].rstrip()
+        context.user_data["registration_name"] = name
+        context.user_data.pop("awaiting_registration_name", None)
+        keyboard = [
+            [InlineKeyboardButton(city, callback_data=f"registration_city_{idx}")]
+            for idx, (city, _) in enumerate(CITIES)
+        ]
+        await update.message.reply_text("🏙️ Выберите ваш город:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
     db_user_for_access, blocked, subscription_active = resolve_user_access(user.id, context)
-    if not db_user_for_access:
-        db_user_for_access = ensure_db_user(user)
-        if db_user_for_access:
-            subscription_active = is_subscription_active(db_user_for_access)
     if blocked:
         await update.message.reply_text("⛔ Доступ к боту закрыт администратором.")
+        return
+    if not db_user_for_access:
+        await update.message.reply_text("Для регистрации напишите /start.")
         return
 
     # Быстрый ввод: "номер + alias комбо/услуг"
@@ -2340,6 +2350,10 @@ async def handle_callback(update: Update, context: CallbackContext):
 
     logger.info(f"Callback: {data} from {user.id}")
 
+    if data.startswith("registration_city_"):
+        await registration_city_set(query, context, data)
+        return
+
     _, blocked, subscription_active = resolve_user_access(user.id, context)
     if blocked:
         await query.edit_message_text("⛔ Доступ к боту закрыт администратором.")
@@ -2432,6 +2446,40 @@ async def handle_callback(update: Update, context: CallbackContext):
             return
 
     await query.edit_message_text("❌ Неизвестная команда")
+
+
+async def registration_city_set(query, context, data):
+    try:
+        idx = int(data.rsplit("_", 1)[1])
+        city, timezone = CITIES[idx]
+    except (ValueError, IndexError):
+        await query.answer("Город не найден", show_alert=True)
+        return
+    name = str(context.user_data.pop("registration_name", "")).strip()
+    if not name:
+        await query.edit_message_text("Регистрация прервана. Нажмите /start и введите имя ещё раз.")
+        return
+    if DatabaseManager.get_user(query.from_user.id):
+        await query.edit_message_text("Профиль уже зарегистрирован.")
+        return
+    DatabaseManager.register_user(query.from_user.id, name)
+    db_user = DatabaseManager.get_user(query.from_user.id)
+    if not db_user:
+        await query.edit_message_text("❌ Не удалось завершить регистрацию. Попробуйте /start.")
+        return
+    DatabaseManager.set_user_city(db_user["id"], city, timezone)
+    expires_at = ensure_trial_subscription(db_user)
+    context.user_data["price_mode"] = sync_price_mode_by_schedule(context, db_user["id"])
+    await query.edit_message_text(f"✅ Город: {city}")
+    if not is_admin_telegram(query.from_user.id):
+        await query.message.reply_text(
+            "🎉 Аккаунт активирован на 7 дней!\n"
+            f"Доступ до: {format_subscription_until(expires_at)}"
+        )
+    await query.message.reply_text(
+        f"👋 Привет, {name}!\nНа связи Делибабос.",
+        reply_markup=create_main_reply_keyboard(False, True),
+    )
 
 
 
@@ -5480,7 +5528,7 @@ def main():
     print("🚀 БОТ ДЛЯ УЧЁТА УСЛУГ - УПРОЩЕННАЯ ВЕРСИЯ")
     print(f"🔖 Версия: {APP_VERSION}")
     print(f"🛠 Обновлено: {APP_UPDATED_AT}")
-    print(f"🕒 Часовой пояс: {APP_TIMEZONE}")
+    print(f"🕒 Город: {APP_TIMEZONE}")
     print("✅ Просто работает")
     print("=" * 60)
     
