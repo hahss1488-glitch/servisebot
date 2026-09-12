@@ -29,12 +29,12 @@ def is_valid_alias(value: str) -> bool:
     return bool(ALIAS_RE.fullmatch(normalize_alias(value)))
 
 
-def parse_fast_input(text: str, user_id: int, service_aliases: dict[int, list[str]]) -> FastInputParse:
+def parse_fast_input(text: str, user_id: int, service_aliases: dict[int, list[str]], require_region: bool = False) -> FastInputParse:
     tokens = [p.strip(" ,.;:!").lower() for p in text.split() if p.strip()]
     if not tokens:
         return FastInputParse(None, None, [], [], "Пустой ввод")
 
-    ok, number, err = validate_car_number(tokens[0])
+    ok, number, err = validate_car_number(tokens[0], require_region=require_region)
     if not ok:
         return FastInputParse(None, None, [], [], err)
 
