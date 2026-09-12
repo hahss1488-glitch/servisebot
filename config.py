@@ -10,8 +10,6 @@ BASE_DIR = Path(__file__).resolve().parent
 DASHBOARD_TEMPLATE_PATH = BASE_DIR / "ui" / "assets" / "dashboard" / "dashboard_template_v2.png"
 LEADERBOARD_TEMPLATE_PATH = BASE_DIR / "ui" / "assets" / "leaderboard" / "leaderboard_template_v2.png"
 
-# Дефолтный регион для автодополнения номеров
-DEFAULT_REGION = "797"
 
 # Соответствие английских букв русским
 ENG_TO_RUS = {
@@ -113,7 +111,7 @@ def normalize_car_number(text: str) -> str:
     return normalized
 
 
-def validate_car_number(text: str) -> tuple[bool, str, str]:
+def validate_car_number(text: str, require_region: bool = False) -> tuple[bool, str, str]:
     """Проверка и нормализация номера машины."""
     if not text:
         return False, "", "Введите номер машины"
@@ -128,7 +126,9 @@ def validate_car_number(text: str) -> tuple[bool, str, str]:
     pattern_short = rf'^[{RUS_LETTERS}]\d{{3}}[{RUS_LETTERS}]{{2}}$'
 
     if re.match(pattern_short, normalized):
-        return True, normalized + DEFAULT_REGION, ""
+        if require_region:
+            return False, normalized, "Укажите регион номера. Например: А123ВС777"
+        return True, normalized, ""
     if re.match(pattern_full, normalized):
         return True, normalized, ""
 
@@ -137,8 +137,9 @@ def validate_car_number(text: str) -> tuple[bool, str, str]:
     compact_digits = ''.join(ch for ch in normalized if ch.isdigit())
     if len(compact_letters) >= 3 and len(compact_digits) >= 3:
         rebuilt = compact_letters[0] + compact_digits[:3] + compact_letters[1:3]
-        rebuilt += compact_digits[3:6] if len(compact_digits) >= 6 else DEFAULT_REGION
-        if re.match(pattern_full, rebuilt):
+        suffix = compact_digits[3:6]
+        rebuilt += suffix
+        if re.match(pattern_full, rebuilt) or (not require_region and re.match(pattern_short, rebuilt)):
             return True, rebuilt, ""
 
     return False, normalized, "Неверный формат. Пример: А123ВС777"

@@ -142,6 +142,12 @@ def init_database():
         cur.execute("ALTER TABLE user_settings ADD COLUMN decade_goal INTEGER DEFAULT 0")
     if "shift_goal" not in columns:
         cur.execute("ALTER TABLE user_settings ADD COLUMN shift_goal INTEGER DEFAULT 0")
+    if "price_switch_mode" not in columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN price_switch_mode TEXT DEFAULT 'auto'")
+    if "timezone" not in columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN timezone TEXT DEFAULT 'Europe/Moscow'")
+    if "region_required" not in columns:
+        cur.execute("ALTER TABLE user_settings ADD COLUMN region_required INTEGER DEFAULT 1")
 
     cur.execute("PRAGMA table_info(shifts)")
     shift_columns = {row[1] for row in cur.fetchall()}
@@ -636,6 +642,44 @@ class DatabaseManager:
         )
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def get_price_preferences(user_id: int) -> Dict:
+        conn = get_connection()
+        row = conn.execute("SELECT price_mode, price_switch_mode, timezone FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+        conn.close()
+        values = dict(row) if row else {}
+        return {
+            "price_mode": values.get("price_mode") if values.get("price_mode") in {"day", "night"} else "day",
+            "switch_mode": values.get("price_switch_mode") if values.get("price_switch_mode") in {"auto", "manual"} else "auto",
+            "timezone": values.get("timezone") or "Europe/Moscow",
+        }
+
+    @staticmethod
+    def set_price_switch_mode(user_id: int, switch_mode: str) -> None:
+        value = "manual" if switch_mode == "manual" else "auto"
+        conn = get_connection()
+        conn.execute("INSERT INTO user_settings (user_id, price_switch_mode) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET price_switch_mode = excluded.price_switch_mode", (user_id, value))
+        conn.commit(); conn.close()
+
+    @staticmethod
+    def set_user_timezone(user_id: int, timezone: str) -> None:
+        conn = get_connection()
+        conn.execute("INSERT INTO user_settings (user_id, timezone) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET timezone = excluded.timezone", (user_id, timezone))
+        conn.commit(); conn.close()
+
+    @staticmethod
+    def is_region_required(user_id: int) -> bool:
+        conn = get_connection()
+        row = conn.execute("SELECT region_required FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+        conn.close()
+        return not row or bool(row["region_required"])
+
+    @staticmethod
+    def set_region_required(user_id: int, required: bool) -> None:
+        conn = get_connection()
+        conn.execute("INSERT INTO user_settings (user_id, region_required) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET region_required = excluded.region_required", (user_id, int(required)))
+        conn.commit(); conn.close()
 
     @staticmethod
     def get_last_decade_notified(user_id: int) -> str:
