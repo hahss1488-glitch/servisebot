@@ -733,6 +733,14 @@ TOOLS_DECADE_GOAL = "🎯 Цель декады"
 TOOLS_RESET = "🗑️ Сброс всех данных"
 TOOLS_ADMIN = "🛡️ Админ панель"
 TOOLS_BACK = "🔙 Назад"
+SETTINGS_TIMEZONE = "🕐 Часовой пояс"
+SETTINGS_PRICE_SWITCH = "💰 Переключение прайса"
+SETTINGS_REGION = "🚗 Регион ТС"
+SETTINGS_DECADE_GOAL = "🎯 Цель декады"
+SETTINGS_HISTORY = "📚 История"
+SETTINGS_COMBO = "🧩 Комбо"
+SETTINGS_RESET = "🗑️ Сброс всех данных"
+SETTINGS_BACK = "🔙 К инструментам"
 
 
 
@@ -781,6 +789,24 @@ def create_tools_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=False,
         input_field_placeholder="Выбери инструмент"
+    )
+
+
+def create_settings_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(SETTINGS_TIMEZONE), KeyboardButton(SETTINGS_PRICE_SWITCH)],
+        [KeyboardButton(SETTINGS_REGION), KeyboardButton(SETTINGS_DECADE_GOAL)],
+        [KeyboardButton(SETTINGS_HISTORY), KeyboardButton(SETTINGS_COMBO)],
+        [KeyboardButton(SETTINGS_RESET)],
+    ]
+    if is_admin:
+        keyboard.append([KeyboardButton(TOOLS_ADMIN)])
+    keyboard.append([KeyboardButton(SETTINGS_BACK)])
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Выбери настройку",
     )
 
 def get_service_order(user_id: int | None = None) -> List[int]:
@@ -1506,6 +1532,7 @@ async def history_hub_message(update: Update, context: CallbackContext):
 
 
 async def tools_hub_message(update: Update, context: CallbackContext):
+    context.user_data.pop("settings_menu_active", None)
     context.user_data["tools_menu_active"] = True
     push_screen(context, Screen(name="tools_menu", kind="reply"))
     await update.message.reply_text(
@@ -1709,6 +1736,16 @@ async def handle_message(update: Update, context: CallbackContext):
             if fast.car_number and not fast.services and len(text.split()) > 1:
                 await update.message.reply_text(f"❌ {fast.error_message}")
                 return
+            if DatabaseManager.is_region_required(db_user_for_access['id']):
+                candidate = text.split(maxsplit=1)[0] if text else ""
+                loose_valid, _, _ = validate_car_number(candidate, require_region=False)
+                strict_valid, _, _ = validate_car_number(candidate, require_region=True)
+                if loose_valid and not strict_valid:
+                    await update.message.reply_text(
+                        '❌ Отсутствует регион в номере ТС.\n\n'
+                        'Используй номер с регионом или отключи «регионы» в настройках.'
+                    )
+                    return
 
     if is_admin_telegram(user.id) and db_user_for_access:
         if await process_admin_broadcast(update, context, db_user_for_access):
@@ -1811,6 +1848,12 @@ async def handle_message(update: Update, context: CallbackContext):
             return
         is_valid, _, error_msg = validate_car_number(text, require_region=DatabaseManager.is_region_required(db_user_for_access['id']))
         if not is_valid:
+            if error_msg.startswith("Укажите регион"):
+                await update.message.reply_text(
+                    '❌ Отсутствует регион в номере ТС.\n\n'
+                    'Используй номер с регионом или отключи «регионы» в настройках.'
+                )
+                return
             await update.message.reply_text(
                 f"❌ Ошибка: {error_msg}\n\nВведите номер ещё раз:"
             )
@@ -2004,6 +2047,51 @@ async def handle_message(update: Update, context: CallbackContext):
         )
         return
 
+    if context.user_data.get("settings_menu_active") and text in {
+        SETTINGS_TIMEZONE,
+        SETTINGS_PRICE_SWITCH,
+        SETTINGS_REGION,
+        SETTINGS_DECADE_GOAL,
+        SETTINGS_HISTORY,
+        SETTINGS_COMBO,
+        SETTINGS_RESET,
+        TOOLS_ADMIN,
+        SETTINGS_BACK,
+    }:
+        db_user = DatabaseManager.get_user(user.id)
+        if text == SETTINGS_BACK:
+            context.user_data.pop("settings_menu_active", None)
+            await update.message.reply_text(
+                "🧰 Инструменты\nВыбери нужный раздел.",
+                reply_markup=create_tools_reply_keyboard(is_admin=is_admin_telegram(user.id)),
+            )
+            return
+        if text == SETTINGS_TIMEZONE:
+            await show_timezone_settings_message(update, db_user)
+            return
+        if text == SETTINGS_PRICE_SWITCH:
+            await show_price_switch_settings_message(update, db_user)
+            return
+        if text == SETTINGS_REGION:
+            await show_region_settings_message(update, db_user)
+            return
+        if text == SETTINGS_HISTORY:
+            await history_message(update, context)
+            return
+        if text == SETTINGS_COMBO:
+            await combo_settings_menu_for_message(update, context)
+            return
+        if text == SETTINGS_DECADE_GOAL:
+            context.user_data["awaiting_decade_goal"] = True
+            await update.message.reply_text("Введи цель декады суммой, например: 35000")
+            return
+        if text == SETTINGS_RESET:
+            await update.message.reply_text("Подтверди сброс:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ Сброс всех данных", callback_data="reset_data")]]))
+            return
+        if text == TOOLS_ADMIN and is_admin_telegram(user.id):
+            await send_admin_panel_for_message(update)
+            return
+
     if context.user_data.get("tools_menu_active") and text in {
         TOOLS_PRICE,
         TOOLS_CALENDAR,
@@ -2018,6 +2106,7 @@ async def handle_message(update: Update, context: CallbackContext):
         db_user = DatabaseManager.get_user(user.id)
         if text == TOOLS_BACK:
             context.user_data.pop("tools_menu_active", None)
+            context.user_data.pop("settings_menu_active", None)
             await update.message.reply_text("Главное меню:", reply_markup=main_menu_for_db_user(db_user, subscription_active))
             return
         if text == TOOLS_PRICE:
@@ -2066,6 +2155,7 @@ async def handle_message(update: Update, context: CallbackContext):
         MENU_ACCOUNT,
     }:
         context.user_data.pop("tools_menu_active", None)
+        context.user_data.pop("settings_menu_active", None)
         if text == MENU_ADD_CAR:
             await add_car_message(update, context)
         elif text in {MENU_SHIFT_OPEN, MENU_SHIFT_CLOSE}:
@@ -2453,10 +2543,11 @@ async def history(query, context):
 
 async def settings(query, context):
     """Настройки"""
-    db_user = DatabaseManager.get_user(query.from_user.id)
-    await query.edit_message_text(
-        f"⚙️ НАСТРОЙКИ\n\nВерсия: {APP_VERSION}\nОбновлено: {APP_UPDATED_AT}\n\nВыберите параметр:",
-        reply_markup=build_settings_keyboard(db_user, is_admin_telegram(query.from_user.id))
+    context.user_data["settings_menu_active"] = True
+    await query.edit_message_text("⚙️ Настройки открыты в клавиатуре под полем ввода.")
+    await query.message.reply_text(
+        "⚙️ Настройки\nВыбери нужный раздел.",
+        reply_markup=create_settings_reply_keyboard(is_admin=is_admin_telegram(query.from_user.id)),
     )
 
 
@@ -4577,9 +4668,11 @@ async def change_decade_goal(query, context):
         DatabaseManager.set_goal_enabled(db_user["id"], False)
         DatabaseManager.set_shift_goal(db_user["id"], 0)
         await disable_goal_status(context, db_user["id"])
-        await query.edit_message_text(
-            "✅ Цель декады выключена.",
-            reply_markup=build_settings_keyboard(db_user, is_admin_telegram(query.from_user.id))
+        context.user_data["settings_menu_active"] = True
+        await query.edit_message_text("✅ Цель декады выключена.")
+        await query.message.reply_text(
+            "⚙️ Настройки\nВыбери нужный раздел.",
+            reply_markup=create_settings_reply_keyboard(is_admin=is_admin_telegram(query.from_user.id)),
         )
         return
 
@@ -4819,10 +4912,10 @@ async def close_shift_message(update: Update, context: CallbackContext):
     )
 
 async def settings_message(update: Update, context: CallbackContext):
-    db_user = DatabaseManager.get_user(update.effective_user.id)
+    context.user_data["settings_menu_active"] = True
     await update.message.reply_text(
-        f"⚙️ НАСТРОЙКИ\n\nВерсия: {APP_VERSION}\nОбновлено: {APP_UPDATED_AT}\n\nВыберите параметр:",
-        reply_markup=build_settings_keyboard(db_user, is_admin_telegram(update.effective_user.id))
+        "⚙️ Настройки\nВыбери нужный раздел.",
+        reply_markup=create_settings_reply_keyboard(is_admin=is_admin_telegram(update.effective_user.id)),
     )
 
 async def leaderboard_message(update: Update, context: CallbackContext):
