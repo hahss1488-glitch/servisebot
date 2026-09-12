@@ -2555,61 +2555,15 @@ def _settings_back_button() -> list[list[InlineKeyboardButton]]:
     return [[InlineKeyboardButton("🔙 К настройкам", callback_data="settings")]]
 
 
-def build_timezone_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    current = DatabaseManager.get_price_preferences(user_id)["timezone"]
-    keyboard = [
-        [InlineKeyboardButton(("✅ " if zone == current else "") + label, callback_data=f"timezone_set_{idx}")]
-        for idx, (zone, label) in enumerate(RUSSIAN_TIMEZONES)
-    ]
-    return InlineKeyboardMarkup(keyboard + _settings_back_button())
-
-
-async def show_timezone_settings_message(update: Update, db_user: dict | None) -> None:
-    if not db_user:
-        await update.message.reply_text("❌ Пользователь не найден")
-        return
-    await update.message.reply_text(
-        "🕐 Часовой пояс\n\nВыберите ваш часовой пояс. В автоматическом режиме прайс меняется в 09:00 и 21:00 по нему.",
-        reply_markup=build_timezone_settings_keyboard(db_user["id"]),
-    )
-
-
-def build_price_switch_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    prefs = DatabaseManager.get_price_preferences(user_id)
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "manual" else "") + "Ручное", callback_data="price_switch_manual"),
-        InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "auto" else "") + "Автоматическое", callback_data="price_switch_auto"),
-    ]] + _settings_back_button())
-
-
-async def show_price_switch_settings_message(update: Update, db_user: dict | None) -> None:
-    if not db_user:
-        await update.message.reply_text("❌ Пользователь не найден")
-        return
-    await update.message.reply_text(
-        "💰 Переключение прайса\n\nАвтоматическое: день 09:00–21:00, ночь 21:00–09:00 по выбранному часовому поясу.\nРучное: в выборе услуг появится кнопка День/Ночь.",
-        reply_markup=build_price_switch_settings_keyboard(db_user["id"]),
-    )
-
-
-async def show_region_settings_message(update: Update, db_user: dict | None) -> None:
-    if not db_user:
-        await update.message.reply_text("❌ Пользователь не найден")
-        return
-    required = DatabaseManager.is_region_required(db_user["id"])
-    label = "Убрать регионы" if required else "Вернуть регионы"
-    explanation = "Регион обязателен в номере." if required else "Номера принимаются без региона и сохраняются без него."
-    await update.message.reply_text(
-        f"🚗 Регион ТС\n\n{explanation}",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="region_toggle")]] + _settings_back_button()),
-    )
-
-
 async def timezone_settings(query, context):
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         return
-    await query.edit_message_text("🕐 Часовой пояс\n\nВыберите ваш часовой пояс. В автоматическом режиме прайс меняется в 09:00 и 21:00 по нему.", reply_markup=build_timezone_settings_keyboard(db_user["id"]))
+    current = DatabaseManager.get_price_preferences(db_user["id"])["timezone"]
+    keyboard = [[InlineKeyboardButton(("✅ " if zone == current else "") + label, callback_data=f"timezone_set_{idx}")]
+                for idx, (zone, label) in enumerate(RUSSIAN_TIMEZONES)]
+    keyboard += _settings_back_button()
+    await query.edit_message_text("🕐 Часовой пояс\n\nВыберите ваш часовой пояс. В автоматическом режиме прайс меняется в 09:00 и 21:00 по нему.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def timezone_set(query, context, data):
@@ -2630,7 +2584,12 @@ async def price_switch_settings(query, context):
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         return
-    await query.edit_message_text("💰 Переключение прайса\n\nАвтоматическое: день 09:00–21:00, ночь 21:00–09:00 по выбранному часовому поясу.\nРучное: в выборе услуг появится кнопка День/Ночь.", reply_markup=build_price_switch_settings_keyboard(db_user["id"]))
+    prefs = DatabaseManager.get_price_preferences(db_user["id"])
+    keyboard = [[
+        InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "manual" else "") + "Ручное", callback_data="price_switch_manual"),
+        InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "auto" else "") + "Автоматическое", callback_data="price_switch_auto"),
+    ]] + _settings_back_button()
+    await query.edit_message_text("💰 Переключение прайса\n\nАвтоматическое: день 09:00–21:00, ночь 21:00–09:00 по выбранному часовому поясу.\nРучное: в выборе услуг появится кнопка День/Ночь.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def price_switch_set(query, context, data):
