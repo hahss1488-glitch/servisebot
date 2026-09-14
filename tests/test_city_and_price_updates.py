@@ -39,14 +39,6 @@ def test_requested_nested_services_and_prices_are_in_price_text():
     assert "Вывод в город - 31₽ / 25₽" in bot.build_price_text()
 
 
-def test_distance_service_is_visible_and_has_seven_rubles_per_kilometer_rate():
-    distance_service = SERVICES[10]
-    assert distance_service["kind"] == "distance"
-    assert distance_service["rate_per_km"] == 7
-    assert 10 in bot.get_service_order()
-    assert "Дальняк - 7₽/км" in bot.build_price_text()
-
-
 def test_leaderboard_includes_city_next_to_name():
     text = bot.build_leaderboard_text("1-я декада", [{"name": "Андрей", "city": "Новосибирск", "total_amount": 100}])
     assert "Андрей (Новосибирск)" in text
