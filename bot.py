@@ -53,6 +53,25 @@ APP_VERSION = "2026.03.09-hotfix-24"
 APP_UPDATED_AT = "09.03.2026 07:40 (МСК)"
 APP_TIMEZONE = "Europe/Moscow"
 LOCAL_TZ = ZoneInfo(APP_TIMEZONE)
+CITIES = [
+    ("Москва", "Europe/Moscow"),
+    ("Санкт-Петербург", "Europe/Moscow"),
+    ("Нижний Новгород", "Europe/Moscow"),
+    ("Екатеринбург", "Asia/Yekaterinburg"),
+    ("Самара", "Europe/Samara"),
+    ("Казань", "Europe/Moscow"),
+    ("Новосибирск", "Asia/Novosibirsk"),
+    ("Челябинск", "Asia/Yekaterinburg"),
+    ("Сочи", "Europe/Moscow"),
+    ("Пермь", "Asia/Yekaterinburg"),
+    ("Краснодар", "Europe/Moscow"),
+    ("Ярославль", "Europe/Moscow"),
+    ("Ростов-на-Дону", "Europe/Moscow"),
+    ("Тольятти", "Europe/Samara"),
+    ("Тула", "Europe/Moscow"),
+    ("Уфа", "Asia/Yekaterinburg"),
+]
+
 RUSSIAN_TIMEZONES = [
     ("Europe/Kaliningrad", "Калининград (UTC+2)"), ("Europe/Moscow", "Москва (UTC+3)"),
     ("Europe/Samara", "Самара (UTC+4)"), ("Asia/Yekaterinburg", "Екатеринбург (UTC+5)"),
@@ -229,7 +248,7 @@ def ensure_db_user(telegram_user) -> dict | None:
 
 async def handle_car_number_input(update: Update, context: CallbackContext, db_user: dict, text: str, force_reply: bool = False) -> bool:
     try:
-        is_valid, normalized_number, _ = validate_car_number(text, require_region=DatabaseManager.is_region_required(db_user["id"]))
+        is_valid, normalized_number, _ = validate_car_number(text)
         if not is_valid:
             return False
 
@@ -428,9 +447,8 @@ def build_settings_keyboard(db_user: dict | None, is_admin: bool) -> InlineKeybo
     decade_goal_enabled = bool(db_user and DatabaseManager.is_goal_enabled(db_user["id"]))
     decade_label = "📆 Цель декады: ВКЛ" if decade_goal_enabled else "📆 Цель декады: ВЫКЛ"
     keyboard = [
-        [InlineKeyboardButton("🕐 Часовой пояс", callback_data="timezone_settings")],
+        [InlineKeyboardButton("🏙️ Изменить город", callback_data="city_settings")],
         [InlineKeyboardButton("💰 Переключение прайса", callback_data="price_switch_settings")],
-        [InlineKeyboardButton("🚗 Регион ТС", callback_data="region_settings")],
         [InlineKeyboardButton(decade_label, callback_data="change_decade_goal")],
         [InlineKeyboardButton("📚 История", callback_data="history_decades")],
         [InlineKeyboardButton("🗓️ Изменить основные смены", callback_data="calendar_rebase")],
@@ -741,9 +759,8 @@ TOOLS_DECADE_GOAL = "🎯 Цель декады"
 TOOLS_RESET = "🗑️ Сброс всех данных"
 TOOLS_ADMIN = "🛡️ Админ панель"
 TOOLS_BACK = "🔙 Назад"
-SETTINGS_TIMEZONE = "🕐 Часовой пояс"
+SETTINGS_CITY = "🏙️ Изменить город"
 SETTINGS_PRICE_SWITCH = "💰 Переключение прайса"
-SETTINGS_REGION = "🚗 Регион ТС"
 SETTINGS_DECADE_GOAL = "🎯 Цель декады"
 SETTINGS_HISTORY = "📚 История"
 SETTINGS_COMBO = "🧩 Комбо"
@@ -802,8 +819,8 @@ def create_tools_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
 
 def create_settings_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton(SETTINGS_TIMEZONE), KeyboardButton(SETTINGS_PRICE_SWITCH)],
-        [KeyboardButton(SETTINGS_REGION), KeyboardButton(SETTINGS_DECADE_GOAL)],
+        [KeyboardButton(SETTINGS_CITY), KeyboardButton(SETTINGS_PRICE_SWITCH)],
+        [KeyboardButton(SETTINGS_DECADE_GOAL)],
         [KeyboardButton(SETTINGS_HISTORY), KeyboardButton(SETTINGS_COMBO)],
         [KeyboardButton(SETTINGS_RESET)],
     ]
@@ -1638,7 +1655,7 @@ async def handle_message(update: Update, context: CallbackContext):
     if db_user_for_access and subscription_active:
         active_shift = DatabaseManager.get_active_shift(db_user_for_access['id'])
         if active_shift:
-            parsed = parse_fast_input(text, db_user_for_access['id'], FAST_SERVICE_ALIASES, require_region=DatabaseManager.is_region_required(db_user_for_access['id']))
+            parsed = parse_fast_input(text, db_user_for_access['id'], FAST_SERVICE_ALIASES)
             if parsed.car_number and parsed.service_ids:
                 car_id = DatabaseManager.add_car(active_shift['id'], parsed.car_number)
                 mode = get_price_mode(context, db_user_for_access["id"])
@@ -1699,20 +1716,30 @@ async def handle_message(update: Update, context: CallbackContext):
     """Обработка текстовых сообщений"""
     user = update.effective_user
     text = (update.message.text or "").strip()
+    if context.user_data.get("awaiting_registration_name"):
+        name = " ".join(text.split())[:32].rstrip()
+        if not name:
+            await update.message.reply_text("Введите имя текстом.")
+            return
+        context.user_data["registration_name"] = name
+        context.user_data.pop("awaiting_registration_name", None)
+        keyboard = [[InlineKeyboardButton(city, callback_data=f"registration_city_{idx}")]
+                    for idx, (city, _) in enumerate(CITIES)]
+        await update.message.reply_text("🏙️ Выберите ваш город:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
     db_user_for_access, blocked, subscription_active = resolve_user_access(user.id, context)
-    if not db_user_for_access:
-        db_user_for_access = ensure_db_user(user)
-        if db_user_for_access:
-            subscription_active = is_subscription_active(db_user_for_access)
     if blocked:
         await update.message.reply_text("⛔ Доступ к боту закрыт администратором.")
+        return
+    if not db_user_for_access:
+        await update.message.reply_text("Для регистрации напишите /start.")
         return
 
     # Быстрый ввод: "номер + сокращения услуг"
     if db_user_for_access and subscription_active:
         active_shift = DatabaseManager.get_active_shift(db_user_for_access['id'])
         if active_shift:
-            fast = parse_fast_car_with_services(text, require_region=DatabaseManager.is_region_required(db_user_for_access['id']))
+            fast = parse_fast_car_with_services(text)
             if fast.car_number and fast.services:
                 car_id = DatabaseManager.add_car(active_shift['id'], fast.car_number)
                 mode = get_price_mode(context, db_user_for_access["id"])
@@ -1746,16 +1773,6 @@ async def handle_message(update: Update, context: CallbackContext):
             if fast.car_number and not fast.services and len(text.split()) > 1:
                 await update.message.reply_text(f"❌ {fast.error_message}")
                 return
-            if DatabaseManager.is_region_required(db_user_for_access['id']):
-                candidate = text.split(maxsplit=1)[0] if text else ""
-                loose_valid, _, _ = validate_car_number(candidate, require_region=False)
-                strict_valid, _, _ = validate_car_number(candidate, require_region=True)
-                if loose_valid and not strict_valid:
-                    await update.message.reply_text(
-                        '❌ Отсутствует регион в номере ТС.\n\n'
-                        'Используй номер с регионом или отключи «регионы» в настройках.'
-                    )
-                    return
 
     if is_admin_telegram(user.id) and db_user_for_access:
         if await process_admin_broadcast(update, context, db_user_for_access):
@@ -1856,14 +1873,8 @@ async def handle_message(update: Update, context: CallbackContext):
             return
         if await handle_car_number_input(update, context, db_user_for_access, text):
             return
-        is_valid, _, error_msg = validate_car_number(text, require_region=DatabaseManager.is_region_required(db_user_for_access['id']))
+        is_valid, _, error_msg = validate_car_number(text)
         if not is_valid:
-            if error_msg.startswith("Укажите регион"):
-                await update.message.reply_text(
-                    '❌ Отсутствует регион в номере ТС.\n\n'
-                    'Используй номер с регионом или отключи «регионы» в настройках.'
-                )
-                return
             await update.message.reply_text(
                 f"❌ Ошибка: {error_msg}\n\nВведите номер ещё раз:"
             )
@@ -2058,9 +2069,8 @@ async def handle_message(update: Update, context: CallbackContext):
         return
 
     if context.user_data.get("settings_menu_active") and text in {
-        SETTINGS_TIMEZONE,
+        SETTINGS_CITY,
         SETTINGS_PRICE_SWITCH,
-        SETTINGS_REGION,
         SETTINGS_DECADE_GOAL,
         SETTINGS_HISTORY,
         SETTINGS_COMBO,
@@ -2076,14 +2086,11 @@ async def handle_message(update: Update, context: CallbackContext):
                 reply_markup=create_tools_reply_keyboard(is_admin=is_admin_telegram(user.id)),
             )
             return
-        if text == SETTINGS_TIMEZONE:
-            await show_timezone_settings_message(update, db_user)
+        if text == SETTINGS_CITY:
+            await show_city_settings_message(update, db_user)
             return
         if text == SETTINGS_PRICE_SWITCH:
             await show_price_switch_settings_message(update, db_user)
-            return
-        if text == SETTINGS_REGION:
-            await show_region_settings_message(update, db_user)
             return
         if text == SETTINGS_HISTORY:
             await history_message(update, context)
@@ -2246,10 +2253,8 @@ async def dispatch_exact_callback(data: str, query, context) -> bool:
         "refresh_dashboard": current_shift,
         "history_0": history,
         "settings": settings,
-        "timezone_settings": timezone_settings,
+        "city_settings": city_settings,
         "price_switch_settings": price_switch_settings,
-        "region_settings": region_settings,
-        "region_toggle": region_toggle,
         "change_decade_goal": change_decade_goal,
         "calendar_rebase": calendar_rebase_callback,
         "leaderboard": leaderboard,
@@ -2374,7 +2379,7 @@ async def handle_callback(update: Update, context: CallbackContext):
     if prefix_handlers is None:
         prefix_handlers = [
         ("service_page_", change_services_page),
-        ("timezone_set_", timezone_set),
+        ("city_set_", city_set),
         ("price_switch_", price_switch_set),
         ("toggle_price_car_", toggle_price_mode_for_car),
         ("repeat_prev_", repeat_prev_services),
@@ -2603,29 +2608,67 @@ def _settings_back_button() -> list[list[InlineKeyboardButton]]:
     return [[InlineKeyboardButton("🔙 К настройкам", callback_data="settings")]]
 
 
-async def timezone_settings(query, context):
+def build_city_keyboard(current_city: str) -> InlineKeyboardMarkup:
+    rows = []
+    for idx, (city, _) in enumerate(CITIES):
+        label = f"✅ {city}" if city == current_city else city
+        rows.append([InlineKeyboardButton(label, callback_data=f"city_set_{idx}")])
+    rows += _settings_back_button()
+    return InlineKeyboardMarkup(rows)
+
+
+async def show_city_settings_message(update: Update, db_user: dict | None) -> None:
+    if not db_user:
+        await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
+        return
+    city = DatabaseManager.get_price_preferences(db_user["id"])["city"]
+    await update.message.reply_text(
+        "🏙️ Выберите город. Часовой пояс будет установлен автоматически.",
+        reply_markup=build_city_keyboard(city),
+    )
+
+
+async def city_settings(query, context):
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         return
-    current = DatabaseManager.get_price_preferences(db_user["id"])["timezone"]
-    keyboard = [[InlineKeyboardButton(("✅ " if zone == current else "") + label, callback_data=f"timezone_set_{idx}")]
-                for idx, (zone, label) in enumerate(RUSSIAN_TIMEZONES)]
-    keyboard += _settings_back_button()
-    await query.edit_message_text("🕐 Часовой пояс\n\nВыберите ваш часовой пояс. В автоматическом режиме прайс меняется в 09:00 и 21:00 по нему.", reply_markup=InlineKeyboardMarkup(keyboard))
+    city = DatabaseManager.get_price_preferences(db_user["id"])["city"]
+    await query.edit_message_text(
+        "🏙️ Выберите город. Часовой пояс будет установлен автоматически.",
+        reply_markup=build_city_keyboard(city),
+    )
 
 
-async def timezone_set(query, context, data):
+async def city_set(query, context, data):
     idx = int(data.rsplit("_", 1)[1])
-    if not 0 <= idx < len(RUSSIAN_TIMEZONES):
+    if not 0 <= idx < len(CITIES):
         return
     db_user = DatabaseManager.get_user(query.from_user.id)
     if not db_user:
         return
-    zone, label = RUSSIAN_TIMEZONES[idx]
-    DatabaseManager.set_user_timezone(db_user["id"], zone)
+    city, timezone = CITIES[idx]
+    DatabaseManager.set_user_city(db_user["id"], city, timezone)
     mode = sync_price_mode_by_schedule(context, db_user["id"])
-    await query.answer("Часовой пояс сохранён")
-    await query.edit_message_text(f"✅ Часовой пояс: {label}\nТекущий прайс: {'день' if mode == 'day' else 'ночь'}.", reply_markup=InlineKeyboardMarkup(_settings_back_button()))
+    await query.answer("Город сохранён")
+    await query.edit_message_text(
+        f"✅ Город: {city}\nТекущий прайс: {'день' if mode == 'day' else 'ночь'}.",
+        reply_markup=InlineKeyboardMarkup(_settings_back_button()),
+    )
+
+
+async def show_price_switch_settings_message(update: Update, db_user: dict | None) -> None:
+    if not db_user:
+        await update.message.reply_text("❌ Пользователь не найден. Напишите /start")
+        return
+    prefs = DatabaseManager.get_price_preferences(db_user["id"])
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "manual" else "") + "Ручное", callback_data="price_switch_manual"),
+        InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "auto" else "") + "Автоматическое", callback_data="price_switch_auto"),
+    ]])
+    await update.message.reply_text(
+        "💰 Переключение прайса\n\nАвтоматическое: день 09:00–21:00, ночь 21:00–09:00 по времени выбранного города.\nРучное: в выборе услуг появится кнопка День/Ночь.",
+        reply_markup=keyboard,
+    )
 
 
 async def price_switch_settings(query, context):
@@ -2637,7 +2680,7 @@ async def price_switch_settings(query, context):
         InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "manual" else "") + "Ручное", callback_data="price_switch_manual"),
         InlineKeyboardButton(("✅ " if prefs["switch_mode"] == "auto" else "") + "Автоматическое", callback_data="price_switch_auto"),
     ]] + _settings_back_button()
-    await query.edit_message_text("💰 Переключение прайса\n\nАвтоматическое: день 09:00–21:00, ночь 21:00–09:00 по выбранному часовому поясу.\nРучное: в выборе услуг появится кнопка День/Ночь.", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("💰 Переключение прайса\n\nАвтоматическое: день 09:00–21:00, ночь 21:00–09:00 по времени выбранного города.\nРучное: в выборе услуг появится кнопка День/Ночь.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def price_switch_set(query, context, data):
@@ -2650,24 +2693,6 @@ async def price_switch_set(query, context, data):
     await query.answer("Режим сохранён")
     await query.edit_message_text(f"✅ Выбран режим: {'ручной' if mode == 'manual' else 'автоматический'}.\nТекущий прайс: {'день' if current == 'day' else 'ночь'}.", reply_markup=InlineKeyboardMarkup(_settings_back_button()))
 
-
-async def region_settings(query, context):
-    db_user = DatabaseManager.get_user(query.from_user.id)
-    if not db_user:
-        return
-    required = DatabaseManager.is_region_required(db_user["id"])
-    label = "Убрать регионы" if required else "Вернуть регионы"
-    explanation = "Регион обязателен в номере." if required else "Номера принимаются без региона и сохраняются без него."
-    await query.edit_message_text(f"🚗 Регион ТС\n\n{explanation}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="region_toggle")]] + _settings_back_button()))
-
-
-async def region_toggle(query, context):
-    db_user = DatabaseManager.get_user(query.from_user.id)
-    if not db_user:
-        return
-    required = not DatabaseManager.is_region_required(db_user["id"])
-    DatabaseManager.set_region_required(db_user["id"], required)
-    await region_settings(query, context)
 
 async def combo_builder_start(query, context):
     db_user = DatabaseManager.get_user(query.from_user.id)
@@ -4761,7 +4786,9 @@ def build_leaderboard_text(decade_title: str, decade_leaders: list[dict]) -> str
     lines = []
     for place, leader in enumerate(decade_leaders, start=1):
         total = format_money(int(leader.get("total_amount", 0)))
-        lines.append(f"{place}. {leader.get('name', '—')} — {total}")
+        name = leader.get("name", "—")
+        city = leader.get("city", "Москва")
+        lines.append(f"{place}. {name} ({city}) — {total}")
     return "\n".join(header + ["", "Кто впереди — тот забирает декаду 👇", ""] + lines)
 
 
