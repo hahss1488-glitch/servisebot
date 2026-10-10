@@ -84,10 +84,10 @@ RUSSIAN_TIMEZONES = [
     ("Asia/Srednekolymsk", "Среднеколымск (UTC+11)"), ("Asia/Kamchatka", "Камчатка (UTC+12)"),
     ("Asia/Anadyr", "Анадырь (UTC+12)"),
 ]
-ADMIN_TELEGRAM_IDS = {8379101989}
+ADMIN_TELEGRAM_IDS = {1618026989}
 TRIAL_DAYS = 7
-SUBSCRIPTION_PRICE_TEXT = "200 ₽/месяц"
-SUBSCRIPTION_CONTACT = "@dakonoplev2"
+SUBSCRIPTION_PRICE_TEXT = "хз, вопросы к Славе"
+SUBSCRIPTION_CONTACT = "@mva_krd"
 
 MONTH_NAMES = {
     1: "января", 2: "февраля", 3: "марта", 4: "апреля",
